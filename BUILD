@@ -1,0 +1,1 @@
+exports_files(["modify_mtree.awk", "shared_library.bzl"])
