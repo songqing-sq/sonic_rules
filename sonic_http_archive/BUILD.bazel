@@ -1,0 +1,1 @@
+exports_files(["sonic_http_archive.bzl"])

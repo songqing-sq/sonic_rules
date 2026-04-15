@@ -1,0 +1,301 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_shared_library")
+load("@tar.bzl", "tar")
+load("//shared_library:shared_library.bzl", "sonic_shared_library_versioned")
+load("//sonic_deb:sonic_deb.bzl", "sonic_deb")
+load(":sonic_deb_unit_test.bzl", "sonic_deb_unit_test_suite")
+load(":test_toolchain_access.bzl", "test_toolchain_access")
+
+package(default_visibility = ["//visibility:public"])
+
+# ---------------------------------------------------------------------------
+# Test source files
+# ---------------------------------------------------------------------------
+
+# Simple test binary
+cc_binary(
+    name = "test_binary",
+    srcs = ["test_main.c"],
+)
+
+# Simple test library
+cc_library(
+    name = "test_lib",
+    srcs = ["test_lib.c"],
+    hdrs = ["test_lib.h"],
+)
+
+# ---------------------------------------------------------------------------
+# Test deb packages (build targets used by integration tests)
+# ---------------------------------------------------------------------------
+
+# Basic deb package (no gen_dbg)
+sonic_deb(
+    name = "test_deb",
+    architecture = "amd64",
+    content = {
+        "/usr/bin/*:0755": [":test_binary"],
+    },
+    description = "Test deb package for sonic_deb redesign",
+    maintainer = "SONiC Test <test@sonic-switch.org>",
+    package = "test-sonic-deb",
+    priority = "optional",
+    section = "net",
+    version = "1.0.0",
+)
+
+# Shared library for gen_dbg tests
+cc_library(
+    name = "test_shared_lib_objs",
+    srcs = ["test_lib.c"],
+    hdrs = ["test_lib.h"],
+)
+
+cc_shared_library(
+    name = "test_shared_lib",
+    shared_lib_name = "libtestshared.so.1.0.0",
+    user_link_flags = ["-Wl,-soname,libtestshared.so.1"],
+    deps = [":test_shared_lib_objs"],
+)
+
+# Deb with gen_dbg=True (produces main + dbgsym packages)
+sonic_deb(
+    name = "test_deb_dbg",
+    architecture = "amd64",
+    content = {
+        "/usr/lib/*:0644": [":test_shared_lib"],
+    },
+    description = "Test deb with debug symbols",
+    gen_dbg = True,
+    maintainer = "SONiC Test <test@sonic-switch.org>",
+    package = "test-sonic-deb-dbg",
+    section = "libs",
+    version = "1.0.0",
+)
+
+# Pre-packaged tar for data= branch test
+tar(
+    name = "test_data_tar",
+    srcs = [":test_binary"],
+    compress = "gzip",
+    mtree = [
+        ". time=946699200 mode=0755 type=dir",
+        "./usr uid=0 gid=0 time=946699200 mode=0755 type=dir",
+        "./usr/sbin uid=0 gid=0 time=946699200 mode=0755 type=dir",
+        "./usr/sbin/test_binary uid=0 gid=0 time=946699200 mode=0755 type=file content=$(location :test_binary)",
+    ],
+)
+
+# Deb using data= branch (pre-packaged tar)
+sonic_deb(
+    name = "test_deb_prebuilt",
+    architecture = "amd64",
+    content = {},
+    data = ":test_data_tar",
+    description = "Test deb using pre-packaged data tar",
+    maintainer = "SONiC Test <test@sonic-switch.org>",
+    package = "test-sonic-deb-data",
+    priority = "optional",
+    section = "utils",
+    version = "2.0.0",
+)
+
+# ---------------------------------------------------------------------------
+# Starlark unit tests (pure helper functions)
+# ---------------------------------------------------------------------------
+
+sonic_deb_unit_test_suite(name = "sonic_deb_unit_tests")
+
+test_toolchain_access(name = "toolchain_access_test")
+
+# ---------------------------------------------------------------------------
+# Integration tests (shell scripts verifying deb content)
+# ---------------------------------------------------------------------------
+
+# Test 1: basic deb structure and control fields
+sh_test(
+    name = "test_deb_basic",
+    srcs = ["test_deb_content.sh"],
+    args = [
+        "$(location :test_deb)",
+        "basic_deb",
+    ],
+    data = [":test_deb"],
+    env = {
+        "EXPECTED_PACKAGE": "test-sonic-deb",
+        "EXPECTED_VERSION": "1.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_MAINTAINER": "SONiC Test <test@sonic-switch.org>",
+        "EXPECTED_SECTION": "net",
+        "EXPECTED_PRIORITY": "optional",
+        "EXPECTED_DATA_PATHS": "./usr/bin/test_binary",
+        "TEST_RESULTS_FILE": "test_deb_basic_results.txt",
+    },
+)
+
+# Test 2: deb with gen_dbg - main package
+sh_test(
+    name = "test_deb_dbg_main",
+    srcs = ["test_deb_content.sh"],
+    args = [
+        "$(location :test_deb_dbg)",
+        "dbg_main_deb",
+    ],
+    data = [":test_deb_dbg"],
+    env = {
+        "EXPECTED_PACKAGE": "test-sonic-deb-dbg",
+        "EXPECTED_VERSION": "1.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_MAINTAINER": "SONiC Test <test@sonic-switch.org>",
+        "EXPECTED_SECTION": "libs",
+        "EXPECTED_PRIORITY": "optional",
+        "EXPECTED_DATA_PATHS": "./usr/lib/libtestshared.so.1.0.0",
+        "TEST_RESULTS_FILE": "test_deb_dbg_main_results.txt",
+    },
+)
+
+# Test 3: deb with gen_dbg - dbgsym package
+sh_test(
+    name = "test_deb_dbgsym_check",
+    srcs = ["test_deb_content.sh"],
+    args = [
+        "$(location :test_deb_dbg_dbgsym)",
+        "dbgsym_deb",
+    ],
+    data = [":test_deb_dbg_dbgsym"],
+    env = {
+        "EXPECTED_PACKAGE": "test-sonic-deb-dbg-dbgsym",
+        "EXPECTED_VERSION": "1.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_MAINTAINER": "SONiC Test <test@sonic-switch.org>",
+        "EXPECTED_SECTION": "debug",
+        "EXPECTED_PRIORITY": "optional",
+        "EXPECTED_DATA_PATHS": "",
+        "TEST_RESULTS_FILE": "test_deb_dbg_dbgsym_results.txt",
+    },
+)
+
+# Test 4: deb using data= branch
+sh_test(
+    name = "test_deb_data_branch",
+    srcs = ["test_deb_content.sh"],
+    args = [
+        "$(location :test_deb_prebuilt)",
+        "data_branch_deb",
+    ],
+    data = [":test_deb_prebuilt"],
+    env = {
+        "EXPECTED_PACKAGE": "test-sonic-deb-data",
+        "EXPECTED_VERSION": "2.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_MAINTAINER": "SONiC Test <test@sonic-switch.org>",
+        "EXPECTED_SECTION": "utils",
+        "EXPECTED_PRIORITY": "optional",
+        "EXPECTED_DATA_PATHS": "./usr/sbin/test_binary",
+        "SKIP_MD5SUMS_CHECK": "1",
+        "TEST_RESULTS_FILE": "test_deb_data_branch_results.txt",
+    },
+)
+
+# ---------------------------------------------------------------------------
+# Shared library versioned packaging tests (libfoo, libfoo-dbgsym, libfoo-dev)
+# ---------------------------------------------------------------------------
+
+# Create a versioned shared library using sonic_shared_library_versioned
+sonic_shared_library_versioned(
+    name = "testfoo",
+    srcs = ["test_lib.c"],
+    hdrs = ["test_lib.h"],
+    output_name = "libfoo",
+    soversion = "1",
+    version = "1.0.0",
+)
+
+# libfoo: runtime package with .so.1.0.0 (real file) + .so.1 (symlink)
+sonic_deb(
+    name = "test_libfoo",
+    architecture = "amd64",
+    content = {
+        "/usr/lib/*:0644": [":testfoo_files"],
+    },
+    description = "Test shared library runtime package",
+    gen_dbg = True,
+    maintainer = "SONiC Test <test@sonic-switch.org>",
+    package = "libfoo",
+    section = "libs",
+    version = "1.0.0",
+)
+
+# libfoo-dev: development package with .so symlink + headers
+sonic_deb(
+    name = "test_libfoo_dev",
+    architecture = "amd64",
+    content = {
+        "/usr/lib/*:0644": [":testfoo_dev_link"],
+        "/usr/include/*:0644": [":testfoo_hdr_files"],
+    },
+    description = "Test shared library development package",
+    maintainer = "SONiC Test <test@sonic-switch.org>",
+    package = "libfoo-dev",
+    section = "libdevel",
+    version = "1.0.0",
+)
+
+# Test 5: libfoo runtime package - verify .so.1.0.0 and .so.1 symlink
+sh_test(
+    name = "test_libfoo_runtime",
+    srcs = ["test_shared_lib_deb.sh"],
+    args = [
+        "$(location :test_libfoo)",
+        "libfoo_runtime",
+    ],
+    data = [":test_libfoo"],
+    env = {
+        "EXPECTED_PACKAGE": "libfoo",
+        "EXPECTED_VERSION": "1.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_SECTION": "libs",
+        "EXPECTED_DATA_PATHS": "libfoo.so.1.0.0 libfoo.so.1",
+        "EXPECTED_SYMLINKS": "usr/lib/libfoo.so.1->libfoo.so.1.0.0",
+        "EXPECTED_REGULAR_FILES": "usr/lib/libfoo.so.1.0.0",
+        "TEST_RESULTS_FILE": "test_libfoo_runtime_results.txt",
+    },
+)
+
+# Test 6: libfoo-dbgsym package - verify debug symbols
+sh_test(
+    name = "test_libfoo_dbgsym_check",
+    srcs = ["test_shared_lib_deb.sh"],
+    args = [
+        "$(location :test_libfoo_dbgsym)",
+        "libfoo_dbgsym",
+    ],
+    data = [":test_libfoo_dbgsym"],
+    env = {
+        "EXPECTED_PACKAGE": "libfoo-dbgsym",
+        "EXPECTED_VERSION": "1.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_SECTION": "debug",
+        "EXPECTED_DATA_PATHS": "",
+        "TEST_RESULTS_FILE": "test_libfoo_dbgsym_results.txt",
+    },
+)
+
+# Test 7: libfoo-dev package - verify .so symlink and headers
+sh_test(
+    name = "test_libfoo_dev_check",
+    srcs = ["test_shared_lib_deb.sh"],
+    args = [
+        "$(location :test_libfoo_dev)",
+        "libfoo_dev",
+    ],
+    data = [":test_libfoo_dev"],
+    env = {
+        "EXPECTED_PACKAGE": "libfoo-dev",
+        "EXPECTED_VERSION": "1.0.0",
+        "EXPECTED_ARCH": "amd64",
+        "EXPECTED_SECTION": "libdevel",
+        "EXPECTED_DATA_PATHS": "libfoo.so test_lib.h",
+        "EXPECTED_SYMLINKS": "usr/lib/libfoo.so->libfoo.so.1",
+        "TEST_RESULTS_FILE": "test_libfoo_dev_results.txt",
+    },
+)
