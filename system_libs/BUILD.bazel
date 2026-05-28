@@ -1,0 +1,34 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Thin cc_library wrappers around system libraries.
+# Consumers should depend on these targets instead of writing -l flags
+# directly in linkopts, so the dependency graph reflects real system
+# library usage and is queryable via `bazel query 'rdeps(..., //system_libs:foo)'`.
+#
+# Note on pthread: use `-pthread` (compiler driver flag), not `-lpthread`.
+# `-pthread` also defines `_REENTRANT` at compile time. We pass it in both
+# copts and linkopts so the compile-time and link-time semantics match
+# what `gcc -pthread` would do.
+
+cc_library(
+    name = "pthread",
+    copts = ["-pthread"],
+    linkopts = ["-pthread"],
+)
+
+cc_library(
+    name = "dl",
+    linkopts = ["-ldl"],
+)
+
+cc_library(
+    name = "m",
+    linkopts = ["-lm"],
+)
+
+cc_library(
+    name = "rt",
+    linkopts = ["-lrt"],
+)
