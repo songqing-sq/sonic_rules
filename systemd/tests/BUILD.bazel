@@ -1,0 +1,16 @@
+load("//systemd:defs.bzl", "systemd_enable")
+
+package(default_visibility = ["//visibility:private"])
+
+systemd_enable(
+    name = "fixture_enable",
+    units = ["ssh.service"],
+    enable = ["ssh.service"],
+)
+
+sh_test(
+    name = "enable_test",
+    srcs = ["enable_test.sh"],
+    args = ["$(rootpath :fixture_enable)"],
+    data = [":fixture_enable"],
+)
