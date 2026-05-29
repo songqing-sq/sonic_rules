@@ -1,0 +1,14 @@
+load("@aspect_rules_py//py/unstable:defs.bzl", "py_venv_binary")
+
+exports_files(["uv.lock"])
+
+py_venv_binary(
+    name = "render",
+    srcs = ["render.py"],
+    main = "render.py",
+    venv = "default",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@pip_tools//jinja2",
+    ],
+)

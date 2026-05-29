@@ -11,6 +11,7 @@ module(
 bazel_dep(name = "swig", version = "4.1.0")
 bazel_dep(name = "rules_cc", version = "0.2.14")
 bazel_dep(name = "rules_python", version = "1.7.0")
+bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "tar.bzl", version = "0.8.1")
 
@@ -70,6 +71,15 @@ apt.install(
         "libstdc++6",
         "linux-libc-dev",
 
+# pip hub for build-time Python tools (e.g. the jinja2 renderer). Declared in
+# this module so targets under @sonic_build_infra can depend on @pip_tools//...
+# without relying on the root module's separate "pip" hub, which is not visible
+# here. Uses the same aspect_rules_py uv extension as docker-base-bookworm.
+uv = use_extension("@aspect_rules_py//uv/unstable:extension.bzl", "uv")
+uv.declare_hub(hub_name = "pip_tools")
+uv.declare_venv(
+    hub_name = "pip_tools",
+    venv_name = "default",
         # Go/Gazelle does not let us inject cgo deps in a clean way.
         # So we have to inject these deps into every c compilation.
         # https://github.com/bazel-contrib/bazel-gazelle/issues/1543
@@ -82,6 +92,13 @@ apt.install(
         "bookworm-security",
     ],
 )
+)
+uv.lockfile(
+    src = "//jinja2:uv.lock",
+    hub_name = "pip_tools",
+    venv_name = "default",
+)
+
 use_repo(apt, "sysroot-bookworm")
 #use_repo(
 #    apt,

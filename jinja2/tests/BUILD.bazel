@@ -1,0 +1,17 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+
+# Render the fixture template using the //jinja2:render tool.
+genrule(
+    name = "render_fixture",
+    srcs = ["fixture.j2"],
+    outs = ["rendered.txt"],
+    cmd = "$(execpath //jinja2:render) $(execpath fixture.j2) $@",
+    tools = ["//jinja2:render"],
+)
+
+# Confirm the rendered output matches the golden file.
+diff_test(
+    name = "render_test",
+    file1 = "expected.txt",
+    file2 = ":rendered.txt",
+)
