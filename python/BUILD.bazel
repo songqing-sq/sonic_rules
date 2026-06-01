@@ -1,1 +1,9 @@
 # Python rules for native extensions & container images.
+
+load("@rules_python//python:defs.bzl", "py_binary")
+
+py_binary(
+    name = "sync_python_version",
+    srcs = ["sync_python_version.py"],
+    visibility = ["//visibility:public"],
+)
