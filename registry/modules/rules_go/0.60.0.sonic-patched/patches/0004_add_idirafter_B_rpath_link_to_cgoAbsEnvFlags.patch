@@ -1,0 +1,13 @@
+diff --git a/go/tools/builders/env.go b/go/tools/builders/env.go
+index e52122a..ddfa9f2 100644
+--- a/go/tools/builders/env.go
++++ b/go/tools/builders/env.go
+@@ -35,7 +35,7 @@ var (
+ 	// cgoEnvVars is the list of all cgo environment variable
+ 	cgoEnvVars = []string{"CGO_CFLAGS", "CGO_CXXFLAGS", "CGO_CPPFLAGS", "CGO_LDFLAGS"}
+ 	// cgoAbsEnvFlags are all the flags that need absolute path in cgoEnvVars
+-	cgoAbsEnvFlags = []string{"-I", "-L", "-isysroot", "-isystem", "-internal-isystem", "-iquote", "-include", "-imacros", "-gcc-toolchain", "--sysroot", "-resource-dir", "-fsanitize-blacklist", "-fsanitize-ignorelist", "--warning-suppression-mappings"}
++	cgoAbsEnvFlags = []string{"-I", "-L", "-isysroot", "-isystem", "-internal-isystem", "-iquote", "-include", "-imacros", "-gcc-toolchain", "--sysroot", "-resource-dir", "-fsanitize-blacklist", "-fsanitize-ignorelist", "--warning-suppression-mappings", "-idirafter", "-B", "-Wl,-rpath-link"}
+ 	// cgoAbsPlaceholder is placed in front of flag values that must be absolutized
+ 	cgoAbsPlaceholder = "__GO_BAZEL_CC_PLACEHOLDER__"
+ )
