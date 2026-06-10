@@ -1,0 +1,46 @@
+load("//shared_library:shared_library.bzl", "sonic_shared_library_versioned")
+load("//sonic_deb:sonic_deb.bzl", "sonic_deb")
+
+PROTOBUF_VERSION = "29.0.0"
+PROTOBUF_SOVERSION = "29"
+
+sonic_shared_library_versioned(
+    name = "libprotobuf",
+    deps = ["@protobuf//:protobuf"],
+    exports_filter = [
+        "@@protobuf+//:__subpackages__",
+        "@@abseil-cpp+//:__subpackages__",
+    ],
+    output_name = "libprotobuf",
+    soversion = PROTOBUF_SOVERSION,
+    version = PROTOBUF_VERSION,
+    visibility = ["//visibility:public"],
+)
+
+sonic_deb(
+    name = "libprotobuf{}_{}.deb".format(PROTOBUF_SOVERSION, PROTOBUF_VERSION),
+    package = "libprotobuf" + PROTOBUF_SOVERSION,
+    version = PROTOBUF_VERSION,
+    section = "libs",
+    description = "Protocol Buffers C++ runtime library (Bazel-built from BCR)",
+    content = {
+        "${LIBDIR}:*:0644": [":libprotobuf_files"],
+    },
+    content_targets = [":libprotobuf_shared"],
+    depends = ["libc6 (>= 2.34)", "libstdc++6 (>= 12)"],
+    gen_dbg = True,
+    visibility = ["//visibility:public"],
+)
+
+sonic_deb(
+    name = "libprotobuf-dev_{}.deb".format(PROTOBUF_VERSION),
+    package = "libprotobuf-dev",
+    version = PROTOBUF_VERSION,
+    section = "libdevel",
+    description = "Protocol Buffers C++ development files (Bazel-built from BCR)",
+    content = {
+        "${LIBDIR}": [":libprotobuf_dev_link"],
+    },
+    depends = ["libprotobuf{} (= {})".format(PROTOBUF_SOVERSION, PROTOBUF_VERSION)],
+    visibility = ["//visibility:public"],
+)
