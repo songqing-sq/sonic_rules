@@ -1,0 +1,342 @@
+diff --git a/cmd/fetch_repo/main.go b/cmd/fetch_repo/main.go
+index ee19803..3b83bf9 100644
+--- a/cmd/fetch_repo/main.go
++++ b/cmd/fetch_repo/main.go
+@@ -36,6 +36,7 @@ var (
+ 	importpath = flag.String("importpath", "", "Go importpath to the repository fetch")
+ 	path       = flag.String("path", "", "absolute or relative path to a local go module")
+ 	dest       = flag.String("dest", "", "destination directory")
++	zipFile    = flag.String("zip", "", "path to a pre-downloaded module zip file (skips go mod download)")
+ 	no_fetch   = flag.Bool("no-fetch", false, "files already exist, do not fetch")
+ 	clean      = flag.Bool("clean", false, "remove existing bazel build files")
+ 
+@@ -109,7 +110,13 @@ func main() {
+ 		if *sum == "" {
+ 			log.Fatal("-sum must be set in module mode")
+ 		}
+-		if err := fetchModule(*dest, *importpath, *version, *sum); err != nil {
++		var err error
++		if *zipFile != "" {
++			err = fetchModuleFromZip(*dest, *importpath, *version, *sum, *zipFile)
++		} else {
++			err = fetchModule(*dest, *importpath, *version, *sum)
++		}
++		if err != nil {
+ 			log.Fatal(err)
+ 		}
+ 	} else {
+diff --git a/cmd/fetch_repo/module_zip.go b/cmd/fetch_repo/module_zip.go
+new file mode 100644
+index 0000000..34d6ab7
+--- /dev/null
++++ b/cmd/fetch_repo/module_zip.go
+@@ -0,0 +1,71 @@
++package main
++
++import (
++	"archive/zip"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"golang.org/x/mod/sumdb/dirhash"
++)
++
++func fetchModuleFromZip(dest, importpath, version, sum, zipPath string) error {
++	prefix := importpath + "@" + version + "/"
++
++	r, err := zip.OpenReader(zipPath)
++	if err != nil {
++		return fmt.Errorf("opening module zip %s: %w", zipPath, err)
++	}
++	defer r.Close()
++
++	for _, f := range r.File {
++		if !strings.HasPrefix(f.Name, prefix) {
++			continue
++		}
++		relPath := strings.TrimPrefix(f.Name, prefix)
++		if relPath == "" {
++			continue
++		}
++		target := filepath.Join(dest, relPath)
++
++		if f.FileInfo().IsDir() {
++			if err := os.MkdirAll(target, 0o777); err != nil {
++				return err
++			}
++			continue
++		}
++
++		if err := os.MkdirAll(filepath.Dir(target), 0o777); err != nil {
++			return err
++		}
++		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode()|0o644)
++		if err != nil {
++			return err
++		}
++		in, err := f.Open()
++		if err != nil {
++			out.Close()
++			return err
++		}
++		_, err = io.Copy(out, in)
++		in.Close()
++		out.Close()
++		if err != nil {
++			return err
++		}
++	}
++	r.Close()
++
++	os.Remove(zipPath)
++
++	repoSum, err := dirhash.HashDir(dest, importpath+"@"+version, dirhash.Hash1)
++	if err != nil {
++		return fmt.Errorf("computing dir hash: %w", err)
++	}
++	if repoSum != sum {
++		return fmt.Errorf("module %s@%s: got sum %s; expected %s", importpath, version, repoSum, sum)
++	}
++	return nil
++}
+diff --git a/internal/bzlmod/go_deps.bzl b/internal/bzlmod/go_deps.bzl
+index 8430b86..ad04003 100644
+--- a/internal/bzlmod/go_deps.bzl
++++ b/internal/bzlmod/go_deps.bzl
+@@ -19,7 +19,7 @@ load(
+     "DEFAULT_BUILD_FILE_GENERATION_BY_PATH",
+     "DEFAULT_DIRECTIVES_BY_PATH",
+ )
+-load(":go_mod.bzl", "deps_from_go_mod", "go_work_from_label", "sums_from_go_mod", "sums_from_go_work")
++load(":go_mod.bzl", "build_goproxy_zip_url", "deps_from_go_mod", "escape_module_path", "go_work_from_label", "sums_from_go_mod", "sums_from_go_work")
+ load(":semver.bzl", "COMPARES_HIGHEST_SENTINEL", "semver")
+ load(
+     ":utils.bzl",
+@@ -344,6 +344,10 @@ def _go_deps_impl(module_ctx):
+     bazel_deps = {}
+     all_tools = []
+ 
++    use_facts = hasattr(module_ctx, "facts")
++    cached_facts = module_ctx.facts if use_facts else {}
++    zip_sha256s = dict(cached_facts.get("zip_sha256s", {}))
++
+     gazelle_default_attributes = _process_gazelle_default_attributes(module_ctx)
+     archive_overrides = {}
+     gazelle_overrides = {}
+@@ -674,6 +678,36 @@ Mismatch between versions requested for Go module {module}:
+             )
+         )
+ 
++    # Compute zip sha256s for modules not yet cached in facts.
++    # This enables Bazel's --repository_cache and --experimental_remote_downloader
++    # to cache Go module downloads via ctx.download(sha256=...).
++    goproxy = go_env.get("GOPROXY", "https://proxy.golang.org,direct")
++    _zip_download_tokens = []
++    for path, module in module_resolutions.items():
++        if hasattr(module, "module_name") or getattr(module, "local_path", None):
++            continue
++        if path in archive_overrides:
++            continue
++        fetch_path = getattr(module, "replace", None) or path
++        version = "v" + module.raw_version
++        fact_key = fetch_path + "@" + version
++        if fact_key in zip_sha256s:
++            continue
++        zip_url = build_goproxy_zip_url(goproxy, fetch_path, version)
++        output = "_zip_sha256_probe/{}.zip".format(fact_key.replace("/", "_"))
++        token = module_ctx.download(
++            url = zip_url,
++            output = output,
++            block = False,
++            allow_fail = True,
++        )
++        _zip_download_tokens.append((fact_key, token, output))
++
++    for fact_key, token, output in _zip_download_tokens:
++        result = token.wait()
++        if result.success:
++            zip_sha256s[fact_key] = result.sha256
++
+     repos_processed = {}
+     for path, module in module_resolutions.items():
+         if hasattr(module, "module_name") or (getattr(module_ctx, "is_isolated", False) and path in _SHARED_REPOS):
+@@ -729,6 +763,11 @@ Mismatch between versions requested for Go module {module}:
+             if sum:
+                 repo_args["sum"] = sum
+ 
++            fetch_path = getattr(module, "replace", None) or path
++            fact_key = fetch_path + "@v" + module.raw_version
++            if fact_key in zip_sha256s:
++                repo_args["zip_sha256"] = zip_sha256s[fact_key]
++
+             go_repository_args.update(repo_args)
+ 
+         go_repository(**go_repository_args)
+@@ -801,7 +840,8 @@ Mismatch between versions requested for Go module {module}:
+             for repo_name in root_module_direct_dev_deps.keys()
+             if repo_name not in root_module_direct_deps
+         }.keys(),
+-        reproducible = True,
++        reproducible = False,
++        facts = {"zip_sha256s": zip_sha256s},
+     )
+ 
+ def _get_sum_from_module(path, module, sums):
+diff --git a/internal/bzlmod/go_mod.bzl b/internal/bzlmod/go_mod.bzl
+index 016e8ed..8854c59 100644
+--- a/internal/bzlmod/go_mod.bzl
++++ b/internal/bzlmod/go_mod.bzl
+@@ -460,6 +460,28 @@ def parse_go_sum(content):
+             hashes[(path, version)] = sum
+     return hashes
+ 
++def escape_module_path(path):
++    """Escape a Go module path for GOPROXY URLs (uppercase -> !lowercase)."""
++    result = []
++    for i in range(len(path)):
++        c = path[i]
++        if c >= "A" and c <= "Z":
++            result.append("!" + c.lower())
++        else:
++            result.append(c)
++    return "".join(result)
++
++def build_goproxy_zip_url(goproxy, module_path, version):
++    """Construct the GOPROXY zip download URL for a Go module."""
++    proxy = "https://proxy.golang.org"
++    for part in goproxy.replace("|", ",").split(","):
++        candidate = part.strip()
++        if candidate and candidate not in ("direct", "off"):
++            proxy = candidate
++            break
++    escaped = escape_module_path(module_path)
++    return proxy.rstrip("/") + "/" + escaped + "/@v/" + version + ".zip"
++
+ def _check_go_mod_name(name):
+     if name != "go.mod":
+         fail("go_deps.from_file requires a 'go.mod' file, not '{}'".format(name))
+diff --git a/internal/bzlmod/utils.bzl b/internal/bzlmod/utils.bzl
+index 53d1cad..87af744 100644
+--- a/internal/bzlmod/utils.bzl
++++ b/internal/bzlmod/utils.bzl
+@@ -124,12 +124,15 @@ def extension_metadata(
+         *,
+         root_module_direct_deps = None,
+         root_module_direct_dev_deps = None,
+-        reproducible = False):
++        reproducible = False,
++        facts = None):
+     if not hasattr(module_ctx, "extension_metadata"):
+         return None
+     metadata_kwargs = {}
+     if bazel_features.external_deps.extension_metadata_has_reproducible:
+         metadata_kwargs["reproducible"] = reproducible
++    if facts != None and hasattr(module_ctx, "facts"):
++        metadata_kwargs["facts"] = facts
+     return module_ctx.extension_metadata(
+         root_module_direct_deps = root_module_direct_deps,
+         root_module_direct_dev_deps = root_module_direct_dev_deps,
+diff --git a/internal/go_repository.bzl b/internal/go_repository.bzl
+index 57fc1f1..d76ba10 100644
+--- a/internal/go_repository.bzl
++++ b/internal/go_repository.bzl
+@@ -117,6 +117,28 @@ Authorization: Bearer RANDOM-TOKEN
+ # We can't disable timeouts on Bazel, but we can set them to large values.
+ _GO_REPOSITORY_TIMEOUT = 86400
+ 
++def _escape_module_path(path):
++    """Escape a Go module path for use in GOPROXY URLs."""
++    result = []
++    for i in range(len(path)):
++        c = path[i]
++        if c >= "A" and c <= "Z":
++            result.append("!" + c.lower())
++        else:
++            result.append(c)
++    return "".join(result)
++
++def _build_goproxy_url(goproxy, module_path, version):
++    """Construct the zip download URL from GOPROXY setting."""
++    proxy = "https://proxy.golang.org"
++    for part in goproxy.replace("|", ",").split(","):
++        candidate = part.strip()
++        if candidate and candidate not in ("direct", "off"):
++            proxy = candidate
++            break
++    escaped = _escape_module_path(module_path)
++    return proxy.rstrip("/") + "/" + escaped + "/@v/" + version + ".zip"
++
+ def _go_repository_impl(ctx):
+     # TODO(#549): vcs repositories are not cached and still need to be fetched.
+     # Download the repository or module.
+@@ -207,12 +229,36 @@ def _go_repository_impl(ctx):
+         reproducible = True
+ 
+         fetch_path = ctx.attr.replace if ctx.attr.replace else ctx.attr.importpath
+-        fetch_repo_args = [
+-            "-dest=" + str(ctx.path("")),
+-            "-importpath=" + fetch_path,
+-            "-version=" + ctx.attr.version,
+-            "-sum=" + ctx.attr.sum,
+-        ]
++
++        if ctx.attr.zip_sha256:
++            # Download module zip via ctx.download(sha256=...) so it goes through
++            # Bazel's repository cache and experimental_remote_downloader.
++            _env = read_cache_env(ctx, go_env_cache)
++            _env.update({k: ctx.os.environ[k] for k in ["GOPROXY"] if k in ctx.os.environ})
++            goproxy = _env.get("GOPROXY", "https://proxy.golang.org,direct")
++            zip_url = _build_goproxy_url(goproxy, fetch_path, ctx.attr.version)
++            zip_path = ctx.path("_go_module.zip")
++            ctx.download(
++                url = [zip_url],
++                output = zip_path,
++                sha256 = ctx.attr.zip_sha256,
++                canonical_id = "gomod|{}|{}".format(fetch_path, ctx.attr.version),
++                auth = use_netrc(read_user_netrc(ctx), [zip_url], ctx.attr.auth_patterns),
++            )
++            fetch_repo_args = [
++                "-dest=" + str(ctx.path("")),
++                "-importpath=" + fetch_path,
++                "-version=" + ctx.attr.version,
++                "-sum=" + ctx.attr.sum,
++                "-zip=" + str(zip_path),
++            ]
++        else:
++            fetch_repo_args = [
++                "-dest=" + str(ctx.path("")),
++                "-importpath=" + fetch_path,
++                "-version=" + ctx.attr.version,
++                "-sum=" + ctx.attr.sum,
++            ]
+     else:
+         fail("one of urls, commit, tag, or version must be specified")
+ 
+@@ -555,6 +601,12 @@ go_repository = repository_rule(
+             A value for `sum` may be found in the `go.sum` file or by running
+             `go mod download -json <module>@<version>`.""",
+         ),
++        "zip_sha256": attr.string(
++            doc = """SHA-256 hash of the module zip file from GOPROXY. When set
++            alongside `version` and `sum`, the module zip is downloaded via
++            Bazel's native downloader (ctx.download) instead of `go mod download`,
++            enabling --repository_cache and --experimental_remote_downloader.""",
++        ),
+         "replace": attr.string(
+             doc = """A replacement for the module named by `importpath`. The module named by
+             `replace` will be downloaded at `version` and verified with `sum`.
+diff --git a/internal/go_repository_tools_srcs.bzl b/internal/go_repository_tools_srcs.bzl
+index 5e4152c..ccc8235 100644
+--- a/internal/go_repository_tools_srcs.bzl
++++ b/internal/go_repository_tools_srcs.bzl
+@@ -14,6 +14,7 @@ GO_REPOSITORY_TOOLS_SRCS = [
+     Label("//cmd/fetch_repo:go_mod_download.go"),
+     Label("//cmd/fetch_repo:main.go"),
+     Label("//cmd/fetch_repo:module.go"),
++    Label("//cmd/fetch_repo:module_zip.go"),
+     Label("//cmd/fetch_repo:vcs.go"),
+     Label("//cmd/gazelle:BUILD.bazel"),
+     Label("//cmd/gazelle:diff.go"),

@@ -1,0 +1,7 @@
+{
+    "homepage": "https://github.com/bazelbuild/bazel-gazelle",
+    "maintainers": [],
+    "versions": [
+        "0.47.0"
+    ]
+}

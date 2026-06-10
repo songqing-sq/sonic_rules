@@ -1,0 +1,10 @@
+{
+    "integrity": "sha256-Z1EU2LQz0Kn1TYEXGDO+luvEETEVZkt5Hm8gTVjpNEY=",
+    "strip_prefix": "",
+    "url": "https://github.com/bazel-contrib/bazel-gazelle/releases/download/v0.47.0/bazel-gazelle-v0.47.0.tar.gz",
+    "patches": {
+        "0000_module_dot_bazel_version.patch": "sha256-VwEoxf/HO2EKSmBo3LmLab0MvUF39UWDxF0hC6+kmWQ=",
+        "0001_go_module_download_via_bazel_cache.patch": "sha256-9q8KsStCqam2V3VKTC0J34Kh8AEHDqhJmsHNmdv1o3k="
+    },
+    "patch_strip": 1
+}
