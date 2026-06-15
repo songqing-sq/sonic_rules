@@ -56,11 +56,19 @@ def _swig_gen_cc_impl(ctx):
     args.add("-python")
     args.add("-Wall")
     args.add("-keyword")
-    args.add("-DSWIGWORDSIZE64")  # Important for 64-bit
+    if ctx.attr.wordsize64:
+        args.add("-DSWIGWORDSIZE64")
+    for define in ctx.attr.defines:
+        args.add("-D" + define)
 
-    # Get include flags (-Ipath)
-    include_args = []
+    # Get include flags (-Ipath). SWIG resolves %include/%import paths against
+    # -I dirs, so feed it every include bucket the deps expose (plain includes,
+    # quote/system includes from cc_library `includes`, and external includes).
     for include in compilation_context.includes.to_list():
+        args.add("-I" + include)
+    for include in compilation_context.quote_includes.to_list():
+        args.add("-I" + include)
+    for include in compilation_context.system_includes.to_list():
         args.add("-I" + include)
     for external_include in compilation_context.external_includes.to_list():
         args.add("-I" + external_include)
@@ -148,7 +156,10 @@ def _swig_gen_go_impl(ctx):
     args.add("-c++")
     args.add("-intgosize")
     args.add("64")
-    args.add("-DSWIGWORDSIZE64")
+    if ctx.attr.wordsize64:
+        args.add("-DSWIGWORDSIZE64")
+    for define in ctx.attr.defines:
+        args.add("-D" + define)
 
     for include in compilation_context.includes.to_list():
         args.add("-I" + include)
@@ -220,8 +231,16 @@ swig_gen_go = rule(
             cfg = "exec",
         ),
         "swig_lib": attr.label(
-            mandatory = True,
-            doc = "SWIG library directory containing swig.swg and language-specific files",
+            default = "@swig//:lib_go",
+            doc = "SWIG library files containing swig.swg and language-specific files. Defaults to @swig//:lib_go from BCR.",
+        ),
+        "wordsize64": attr.bool(
+            default = True,
+            doc = "Set -DSWIGWORDSIZE64 for 64-bit targets (amd64/arm64). Set False for 32-bit.",
+        ),
+        "defines": attr.string_list(
+            default = [],
+            doc = "Additional preprocessor defines to pass to SWIG (without -D prefix).",
         ),
     },
     fragments = ["cpp"],
@@ -258,8 +277,16 @@ swig_gen = rule(
             cfg = "exec",
         ),
         "swig_lib": attr.label(
-            mandatory = True,
-            doc = "SWIG library directory containing swig.swg and language-specific files",
+            default = "@swig//:lib_python",
+            doc = "SWIG library files containing swig.swg and language-specific files. Defaults to @swig//:lib_python from BCR.",
+        ),
+        "wordsize64": attr.bool(
+            default = True,
+            doc = "Set -DSWIGWORDSIZE64 for 64-bit targets (amd64/arm64). Set False for 32-bit.",
+        ),
+        "defines": attr.string_list(
+            default = [],
+            doc = "Additional preprocessor defines to pass to SWIG (without -D prefix).",
         ),
     },
     fragments = ["cpp"],
