@@ -100,6 +100,18 @@ uv.lockfile(
     venv_name = "default",
 )
 
+# Build-time pyang (YANG codegen) runner. Separate venv on the same pip_tools
+# hub so @sonic_build_infra//pyang:pyang can depend on @pip_tools//pyang.
+uv.declare_venv(
+    hub_name = "pip_tools",
+    venv_name = "pyang",
+)
+uv.lockfile(
+    src = "//pyang:uv.lock",
+    hub_name = "pip_tools",
+    venv_name = "pyang",
+)
+use_repo(uv, "pip_tools")
 use_repo(apt, "sysroot-bookworm")
 #use_repo(
 #    apt,

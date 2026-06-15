@@ -1,0 +1,25 @@
+load("@aspect_rules_py//py/unstable:defs.bzl", "py_venv_binary")
+
+exports_files(["uv.lock"])
+
+# Hermetic pyang runner for build-time YANG codegen (tree/jstree/yin-cvl).
+# pyang ships its CLI as a plain script (no console_scripts entry point), so
+# pyang_main.py is the upstream pyang 2.4.0 script body (shebang stripped). It is
+# named pyang_main (not pyang) to avoid shadowing the `pyang` package it imports.
+# pkg_resources.py is a minimal shim: pyang 2.4.0 imports pkg_resources only for
+# entry-point plugin discovery, which we bypass with --plugindir. The uv hub does
+# not install setuptools (treated as a build-only tool), so the shim provides the
+# one symbol pyang touches.
+py_venv_binary(
+    name = "pyang",
+    srcs = [
+        "pkg_resources.py",
+        "pyang_main.py",
+    ],
+    main = "pyang_main.py",
+    venv = "pyang",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@pip_tools//pyang",
+    ],
+)

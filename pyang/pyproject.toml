@@ -1,0 +1,7 @@
+[project]
+name = "pyang-runner"
+version = "0.0.1"
+requires-python = "==3.11.6"
+dependencies = [
+    "pyang==2.4.0",
+]
