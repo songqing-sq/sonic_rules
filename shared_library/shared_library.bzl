@@ -61,9 +61,59 @@ symlink_to_path = rule(
     },
 )
 
-def _sonic_shared_library_impl(name, visibility, dynamic_deps, deps, objects, srcs, output_name, exports_filter, **kwargs):
+def _static_archive_impl(ctx):
+    """Extract the (PIC) static library .a from a cc_library's CcInfo and copy it
+    to a deterministically-named output (lib<output_name>.a) for -dev packaging."""
+    cc_info = ctx.attr.lib[CcInfo]
+    archive = None
+    for li in cc_info.linking_context.linker_inputs.to_list():
+        for lib in li.libraries:
+            if lib.pic_static_library:
+                archive = lib.pic_static_library
+                break
+            if lib.static_library:
+                archive = lib.static_library
+                break
+        if archive:
+            break
+    if not archive:
+        fail("no static archive found in {}".format(ctx.attr.lib.label))
+
+    out = ctx.actions.declare_file(ctx.attr.output_name + ".a")
+    ctx.actions.run_shell(
+        inputs = [archive],
+        outputs = [out],
+        command = "cp \"$1\" \"$2\"",
+        arguments = [archive.path, out.path],
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+static_archive = rule(
+    implementation = _static_archive_impl,
+    doc = "Extract the static .a from a cc_library and rename it lib<output_name>.a.",
+    attrs = {
+        "lib": attr.label(mandatory = True, providers = [CcInfo]),
+        "output_name": attr.string(mandatory = True),
+    },
+)
+
+def _version_script_flags(version_script):
+    """Return (extra user_link_flags, additional_linker_inputs) for an optional
+    linker version script. The flag uses $(location) so cc_shared_library expands
+    it to the execpath of the version-script file."""
+    if not version_script:
+        return [], []
+    return ["-Wl,--version-script=$(location {})".format(version_script)], [version_script]
+
+def _sonic_shared_library_impl(name, visibility, dynamic_deps, deps, objects, srcs, output_name, exports_filter, version_script, allow_undefined, **kwargs):
     if not output_name:
         output_name = "lib" + name
+
+    vscript_flags, vscript_inputs = _version_script_flags(version_script)
+
+    # Python C extensions (and other dlopened plugins) legitimately leave
+    # interpreter-provided symbols undefined; -Wl,-z,defs must be dropped there.
+    defs_flags = [] if allow_undefined else ["-Wl,-z,defs"]
 
     cc_library(
         name = name,
@@ -85,20 +135,24 @@ def _sonic_shared_library_impl(name, visibility, dynamic_deps, deps, objects, sr
         deps = [":" + name] + objects,
         dynamic_deps = dynamic_deps,
         exports_filter = exports_filter,
+        additional_linker_inputs = vscript_inputs,
         user_link_flags = select({
             "@platforms//os:linux": [
                 "-Wl,-soname," + output_name + ".so",
-                "-Wl,-z,defs",
-            ],
+            ] + defs_flags + vscript_flags,
             "//conditions:default": [],
         }),
         shared_lib_name = output_name + ".so",
         visibility = visibility,
     )
 
-def _sonic_shared_library_versioned_impl(name, visibility, dynamic_deps, deps, objects, srcs, soversion, version, output_name, exports_filter, **kwargs):
+def _sonic_shared_library_versioned_impl(name, visibility, dynamic_deps, deps, objects, srcs, soversion, version, output_name, exports_filter, version_script, allow_undefined, **kwargs):
     if not output_name:
         output_name = "lib" + name
+
+    vscript_flags, vscript_inputs = _version_script_flags(version_script)
+
+    defs_flags = [] if allow_undefined else ["-Wl,-z,defs"]
 
     cc_library(
         name = name,
@@ -113,11 +167,11 @@ def _sonic_shared_library_versioned_impl(name, visibility, dynamic_deps, deps, o
         deps = [":" + name] + objects,
         dynamic_deps = dynamic_deps,
         exports_filter = exports_filter,
+        additional_linker_inputs = vscript_inputs,
         user_link_flags = select({
             "@platforms//os:linux": [
                 "-Wl,-soname," + output_name + ".so." + soversion,
-                "-Wl,-z,defs",
-            ],
+            ] + defs_flags + vscript_flags,
             "//conditions:default": [],
         }),
         shared_lib_name = output_name + ".so." + version,
@@ -163,6 +217,8 @@ sonic_shared_library = macro(
         "deps": attr.label_list(),
         "objects": attr.label_list(),
         "output_name": attr.string(configurable = False),
+        "version_script": attr.label(allow_single_file = True, configurable = False),
+        "allow_undefined": attr.bool(default = False, configurable = False),
     },
     implementation = _sonic_shared_library_impl,
 )
@@ -178,6 +234,8 @@ sonic_shared_library_versioned = macro(
         "soversion": attr.string(configurable = False),
         "version": attr.string(configurable = False),
         "output_name": attr.string(configurable = False),
+        "version_script": attr.label(allow_single_file = True, configurable = False),
+        "allow_undefined": attr.bool(default = False, configurable = False),
     },
     implementation = _sonic_shared_library_versioned_impl,
 )
