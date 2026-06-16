@@ -14,12 +14,25 @@ def _sonic_http_archive_impl(repository_ctx):
         type = repository_ctx.attr.type,
     )
 
-    # 2. Apply patches
+    # 2. Apply patches.
+    # Bazel's native patch implementation rejects some valid git-format patches
+    # (e.g. a "\ No newline at end of file" marker on the final hunk). When
+    # patch_tool is set, shell out to the system patch utility (-p1) which is
+    # more lenient and matches the legacy `git apply -p1` / `patch -p1` flow.
+    patch_tool = repository_ctx.attr.patch_tool
+    patch_strip = repository_ctx.attr.patch_strip
     for patch in repository_ctx.attr.patches:
-        repository_ctx.patch(
-            repository_ctx.path(patch),
-            strip = 1,
-        )
+        if patch_tool:
+            result = repository_ctx.execute(
+                [patch_tool, "-p" + str(patch_strip), "--no-backup-if-mismatch", "-i", repository_ctx.path(patch)],
+            )
+            if result.return_code != 0:
+                fail("Error applying patch {}:\n{}\n{}".format(patch, result.stdout, result.stderr))
+        else:
+            repository_ctx.patch(
+                repository_ctx.path(patch),
+                strip = patch_strip,
+            )
 
     # 3. Generate BUILD file from template
     repo_dir = "external/" + repository_ctx.name
@@ -51,6 +64,19 @@ sonic_http_archive = repository_rule(
         ),
         "patches": attr.label_list(
             doc = "Patch files to apply after extraction.",
+        ),
+        "patch_tool": attr.string(
+            default = "",
+            doc = "If set (e.g. \"patch\"), use this system tool (-p1) to apply " +
+                  "patches instead of Bazel's native patch. More lenient with " +
+                  "git-format patches that have malformed newline markers.",
+        ),
+        "patch_strip": attr.int(
+            default = 1,
+            doc = "Strip level (-pN) applied to every patch, for both the " +
+                  "native and patch_tool code paths. Default 1 preserves all " +
+                  "existing callers; set to 2 when patch paths carry an extra " +
+                  "leading component (e.g. a/<pkg-version>/...).",
         ),
         "build_file_template": attr.label(
             mandatory = True,
