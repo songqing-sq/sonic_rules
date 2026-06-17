@@ -1,0 +1,15 @@
+# Standalone build of rules_thrift (bazel build //tests:all from this dir).
+# When rules_thrift is the root module, its dev_dependency apt set
+# (@thrift_test_deps libthrift-dev/libboost-dev) is active, so the cpp
+# cc_library //tests:sample_cc compiles + links. The registries live in the
+# parent repo; point back at them so rules_thrift + sonic-build-infra resolve.
+# (When consumed from the repo root the dev deps are dropped and the cpp
+# cc_library's apt deps come from the consumer's own apt set per thrift.md.)
+common --registry=file://%workspace%/../registry
+common --registry=https://bcr.bazel.build
+
+common --experimental_isolated_extension_usages
+
+# The apt cc_import deps select() on @platforms//os:linux + cpu:x86_64, which the
+# default host platform on an x86_64 Linux builder already satisfies -- no
+# explicit --platforms needed.

@@ -1,0 +1,40 @@
+load(":thrift_toolchain.bzl", "thrift_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+# Re-export thrift.bzl symbols are loaded by label "@rules_thrift//:thrift.bzl".
+exports_files(["thrift.bzl", "thrift_toolchain.bzl"])
+
+# The thrift toolchain type. The `thrift` rule resolves the compiler via this.
+toolchain_type(name = "toolchain_type")
+
+# Alias the hermetic 0.17.0 compiler built from @thrift_src_0_17_0.
+alias(
+    name = "thrift_compiler",
+    actual = "@thrift_src_0_17_0//:thrift_compiler",
+)
+
+# The toolchain implementation: wraps the compiler, provides ThriftToolchainInfo
+# + TemplateVariableInfo(THRIFT=...). This target is referenced two ways:
+#   * as a `toolchain` (below) resolved by the `thrift` rule via toolchain_type.
+#   * directly in a genrule `toolchains` attr for the $(THRIFT) make var
+#     (thrift_cc_library), via the :thrift_toolchain_for_make_var alias.
+thrift_toolchain(
+    name = "thrift_toolchain_impl",
+    compiler = ":thrift_compiler",
+)
+
+# Registered (in MODULE.bazel) so the `thrift` rule resolves the compiler.
+toolchain(
+    name = "thrift_toolchain",
+    toolchain = ":thrift_toolchain_impl",
+    toolchain_type = ":toolchain_type",
+)
+
+# A genrule's `toolchains` attr reads TemplateVariableInfo from the listed
+# targets directly. thrift_toolchain_impl provides TemplateVariableInfo(THRIFT),
+# so the thrift_cc_library genrule lists this alias to get $(THRIFT).
+alias(
+    name = "thrift_toolchain_for_make_var",
+    actual = ":thrift_toolchain_impl",
+)

@@ -1,0 +1,125 @@
+# rules_thrift: hermetic Apache Thrift code generation for Bazel.
+#
+# Provides the `thrift` rule and `thrift_cc_library` macro (thrift.bzl), backed
+# by a Thrift 0.17.0 compiler built from Apache source as a cc_binary. flex/bison
+# come from BCR rules_flex / rules_bison (hermetic). The compiler is the
+# standalone codegen program (compiler/cpp/ only) -- it does NOT link libthrift
+# or boost. 0.17.0 matches bookworm's apt libthrift-0.17.0 / libthrift-dev, so
+# generated C++ links the apt libthrift at the consumer.
+#
+# The thrift toolchain is auto-registered below; consumers only need:
+#   bazel_dep(name = "rules_thrift", version = "0.0.0")
+module(
+    name = "rules_thrift",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.14")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# flex / bison for compiling the thrift compiler's thriftl.ll lexer and
+# thrifty.yy parser. rules_bison needs rules_m4 (bison uses m4 internally).
+bazel_dep(name = "rules_flex", version = "0.4")
+bazel_dep(name = "rules_bison", version = "0.4")
+bazel_dep(name = "rules_m4", version = "0.3")
+
+# Isolated flex/bison repositories so this module's toolchain choice does not
+# clash with a consumer's own flex/bison toolchain registration (e.g. the root
+# workspace registers @flex 2.6.4 / @bison 3.3.2). isolate = True scopes the
+# created repos + toolchains to this module.
+flex = use_extension(
+    "@rules_flex//flex/extensions:flex_repository_ext.bzl",
+    "flex_repository_ext",
+    isolate = True,
+)
+flex.repository(
+    name = "thrift_flex",
+    version = "2.6.4",
+    extra_copts = ["-Wno-format-truncation", "-Wno-unused-parameter"],
+)
+use_repo(flex, "thrift_flex")
+register_toolchains("@thrift_flex//:toolchain")
+
+bison = use_extension(
+    "@rules_bison//bison/extensions:bison_repository_ext.bzl",
+    "bison_repository_ext",
+    isolate = True,
+)
+bison.repository(
+    name = "thrift_bison",
+    version = "3.3.2",
+    extra_copts = ["-Wno-sign-compare"],
+)
+use_repo(bison, "thrift_bison")
+register_toolchains("@thrift_bison//:toolchain")
+
+m4 = use_extension(
+    "@rules_m4//m4/extensions:m4_repository_ext.bzl",
+    "m4_repository_ext",
+    isolate = True,
+)
+m4.repository(name = "thrift_m4")
+use_repo(m4, "thrift_m4")
+register_toolchains("@thrift_m4//:toolchain")
+
+# === Apache Thrift 0.17.0 source (compiler only) ===
+# 0.17.0 matches bookworm's apt libthrift, so generated C++ #includes/links the
+# apt libthrift-dev / libthrift-0.17.0 at the consumer. The official Apache
+# release tarball; sha256 verified against the downloaded archive.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "thrift_src_0_17_0",
+    build_file = "//:thrift.BUILD",
+    sha256 = "b272c1788bb165d99521a2599b31b97fa69e5931d099015d91ae107a0b0cc58f",
+    strip_prefix = "thrift-0.17.0",
+    urls = [
+        "https://archive.apache.org/dist/thrift/0.17.0/thrift-0.17.0.tar.gz",
+        "https://packages.trafficmanager.net/public/thrift/0.17.0/thrift-0.17.0.tar.gz",
+    ],
+)
+
+# Auto-register the thrift toolchain so consumers need no extra config.
+register_toolchains("@rules_thrift//:thrift_toolchain")
+
+# === Test-only apt deps (libthrift-dev + libboost-dev) =====================
+# Used solely by //tests to prove the generated C++ compiles + links against
+# the apt libthrift (the same runtime consumers use). These deps are NOT part
+# of the public rules_thrift API -- consumers add libthrift-dev/libboost-dev to
+# their own apt set per thrift.md. dev_dependency so they are dropped when
+# rules_thrift is consumed as a dependency.
+bazel_dep(name = "rules_distroless", version = "0.0.0", repo_name = "rules_deb", dev_dependency = True)
+git_override(
+    module_name = "rules_distroless",
+    commit = "cf7a013",
+    remote = "git@gitlab.alibaba-inc.com:SONiC/rules_distroless.git",
+)
+
+apt = use_extension("@rules_deb//apt:extensions.bzl", "apt", dev_dependency = True)
+apt.sources_list(
+    architectures = ["amd64", "arm64"],
+    components = ["main"],
+    suites = ["bookworm", "bookworm-updates"],
+    uris = ["https://sonic-build.alibaba-inc.com/debian_snapshot/20260410"],
+)
+apt.sources_list(
+    architectures = ["amd64", "arm64"],
+    components = ["main"],
+    suites = ["bookworm-security"],
+    uris = ["https://sonic-build.alibaba-inc.com/debian_snapshot/20260410"],
+)
+apt.install(
+    dependency_set = "thrift_test_deps",
+    packages = [
+        "libthrift-dev",
+        "libboost-dev",
+    ],
+    suites = ["bookworm", "bookworm-updates", "bookworm-security"],
+)
+use_repo(apt, "thrift_test_deps")
+
+# py_library for the //tests python codegen target. Non-dev so the python test
+# target builds from the root workspace too (rules_python is already in the root
+# module graph, so this adds nothing to a consumer's closure).
+bazel_dep(name = "rules_python", version = "1.7.0")

@@ -1,0 +1,4 @@
+# Standalone-build artifacts (the module is normally consumed from the repo
+# root; building it standalone via the local .bazelrc produces these).
+bazel-*
+MODULE.bazel.lock

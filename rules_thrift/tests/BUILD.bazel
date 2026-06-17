@@ -1,0 +1,48 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_thrift//:thrift.bzl", "thrift", "thrift_cc_library")
+
+package(default_visibility = ["//visibility:private"])
+
+# --- C++: thrift_cc_library (codegen + cc_library compile) -------------------
+# Proves cpp codegen + cc_library compile + link against the apt libthrift.
+# outs are the flat files thrift emits for sample.thrift (a const -> *_constants,
+# a struct -> *_types, a service -> Service.{cpp,h} + skeleton).
+thrift_cc_library(
+    name = "sample_cc",
+    src = "sample.thrift",
+    outs = [
+        "sample_constants.cpp",
+        "sample_constants.h",
+        "sample_types.cpp",
+        "sample_types.h",
+        "ItemService.cpp",
+        "ItemService.h",
+        "ItemService_server.skeleton.cpp",
+    ],
+    deps = [
+        "@thrift_test_deps//libthrift-dev:libthrift",
+        "@thrift_test_deps//libboost-dev:libboost",
+    ],
+)
+
+# --- Python: thrift rule (TreeArtifact) + py_library ------------------------
+thrift(
+    name = "sample_py",
+    src = "sample.thrift",
+    language = "py",
+)
+
+py_library(
+    name = "sample_py_lib",
+    srcs = [":sample_py"],
+)
+
+# --- Go: thrift rule (TreeArtifact) ----------------------------------------
+# rules_go is not a dep of this module, so we prove go codegen by building the
+# TreeArtifact (the generated .go files). A consumer with a go toolchain wraps
+# this in a go_library (see thrift.md).
+thrift(
+    name = "sample_go",
+    src = "sample.thrift",
+    language = "go",
+)
