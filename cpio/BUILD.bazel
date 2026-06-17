@@ -1,0 +1,3 @@
+# Exposes the cpio 2.14 gnulib generated-header patch as a label so the
+# @cpio_src http_archive in MODULE.bazel can reference it via `patches`.
+exports_files(["generated.patch"])

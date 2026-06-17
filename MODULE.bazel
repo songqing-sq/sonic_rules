@@ -126,3 +126,247 @@ use_repo(apt, "sysroot-bookworm")
 
 # rules_pkg removed: sonic_deb now uses ar/tar/objcopy directly from CC toolchain
 # TODO(bazel-ready): Add auto-formatting with buildifier
+# ----------------------------------------------------------------------------
+# GNU cpio 2.14 — hermetic native Bazel host tool.
+#
+# Used by kbuild scripts for initramfs/cpio archive handling. cpio is autotools
+# + a large gnulib portability layer. Per the autoconf reference we do NOT run
+# ./configure or autoreconf, and we do NOT use rules_foreign_cc.
+#
+# gnulib generates ~24 override headers (stdio.h, unistd.h, fcntl.h, ...) plus
+# config.h via sed recipes driven by hundreds of configure-computed
+# substitution variables (GNULIB_*, REPLACE_*, HAVE_RAW_DECL_*, ...). Those
+# values are fixed for Debian bookworm glibc x86_64. Rather than reproduce the
+# sed recipes, the generated headers + config.h (the exact, deterministic
+# configure output for that platform) are injected as new files via the
+# http_archive `patches` mechanism (cpio/generated.patch). This is purely
+# additive — no upstream source file is modified — so the result still compiles
+# with plain cc_library/cc_binary.
+#
+# The cpio program links three native libraries built from source:
+#   - libgnu  : the 89 gnulib .c objects that actually go into libgnu.a on
+#               glibc (the conditional/no-op modules are simply not compiled),
+#               taken verbatim from `ar t gnu/libgnu.a` of a reference build.
+#   - libpax  : lib/libpax.a (paxutils helpers), from lib/Makefile.am
+#               libpax_a_SOURCES.
+#   - cpio    : src/*.c minus mt.c (the `mt` tape tool is a separate program),
+#               i.e. cpio_SOURCES from src/Makefile.am.
+# -fcommon restores the pre-GCC-10 common-symbol behavior the autotools
+# archive link relies on (argp_program_bug_address is a tentative definition in
+# multiple TUs). The warning suppressions mirror gnulib's GL_CFLAG_GNULIB_WARNINGS.
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "cpio_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+CPIO_COPTS = [
+    "-DHAVE_CONFIG_H",
+    "-fcommon",
+    "-Wno-cast-qual",
+    "-Wno-conversion",
+    "-Wno-float-equal",
+    "-Wno-sign-compare",
+    "-Wno-undef",
+    "-Wno-unused-function",
+    "-Wno-unused-parameter",
+    "-Wno-float-conversion",
+    "-Wimplicit-fallthrough",
+    "-Wno-sign-conversion",
+    "-Wno-type-limits",
+    "-Wno-implicit-function-declaration",
+]
+
+CPIO_INCLUDES = [
+    ".",     # config.h
+    "gnu",   # gnulib generated + static headers
+    "lib",   # paxutils headers
+    "src",   # cpio internal headers
+]
+
+# safe-read.c is dual-purpose: compiled standalone it defines safe_read, and it
+# is also textually #included by safe-write.c (which #defines SAFE_WRITE to
+# produce safe_write). Since a file cannot be both a src and a textual_hdr, we
+# stage safe-read.c as a textual header and synthesize a tiny standalone TU that
+# #includes it to keep safe_read in libgnu.a.
+genrule(
+    name = "gnu_safe_read_tu",
+    outs = ["gnu/safe_read_standalone.c"],
+    cmd = "echo '#include \\"safe-read.c\\"' > $@",
+)
+
+# gnulib portability layer. Source list = the objects that actually land in
+# libgnu.a on glibc/bookworm (89 files).
+cc_library(
+    name = "gnu",
+    srcs = [
+        "gnu/argmatch.c",
+        "gnu/argp-ba.c",
+        "gnu/argp-eexst.c",
+        "gnu/argp-fmtstream.c",
+        "gnu/argp-fs-xinl.c",
+        "gnu/argp-help.c",
+        "gnu/argp-parse.c",
+        "gnu/argp-pin.c",
+        "gnu/argp-pv.c",
+        "gnu/argp-pvh.c",
+        "gnu/argp-version-etc.c",
+        "gnu/argp-xinl.c",
+        "gnu/basename-lgpl.c",
+        "gnu/basename.c",
+        "gnu/bitrotate.c",
+        "gnu/btowc.c",
+        "gnu/c-ctype.c",
+        "gnu/c-strcasecmp.c",
+        "gnu/c-strncasecmp.c",
+        "gnu/chdir-long.c",
+        "gnu/cloexec.c",
+        "gnu/close-stream.c",
+        "gnu/closeout.c",
+        "gnu/dirfd.c",
+        "gnu/dirname-lgpl.c",
+        "gnu/dirname.c",
+        "gnu/dup-safer-flag.c",
+        "gnu/dup-safer.c",
+        "gnu/exitfail.c",
+        "gnu/fcntl.c",
+        "gnu/fd-hook.c",
+        "gnu/fd-safer-flag.c",
+        "gnu/fd-safer.c",
+        "gnu/filenamecat-lgpl.c",
+        "gnu/full-write.c",
+        "gnu/getopt.c",
+        "gnu/getopt1.c",
+        "gnu/getprogname.c",
+        "gnu/gettime.c",
+        "gnu/hard-locale.c",
+        "gnu/hash.c",
+        "gnu/ialloc.c",
+        "gnu/imaxtostr.c",
+        "gnu/inttostr.c",
+        "gnu/localcharset.c",
+        "gnu/malloca.c",
+        "gnu/mbrtowc.c",
+        "gnu/mbsrtowcs-state.c",
+        "gnu/mbsrtowcs.c",
+        "gnu/mktime.c",
+        "gnu/nstrftime.c",
+        "gnu/obstack.c",
+        "gnu/offtostr.c",
+        "gnu/openat-die.c",
+        "gnu/openat-proc.c",
+        "gnu/opendir-safer.c",
+        "gnu/parse-datetime.c",
+        "gnu/pipe-safer.c",
+        "gnu/printf-args.c",
+        "gnu/printf-parse.c",
+        "gnu/progname.c",
+        "gnu/quotearg.c",
+        ":gnu_safe_read_tu",
+        "gnu/safe-write.c",
+        "gnu/save-cwd.c",
+        "gnu/savedir.c",
+        "gnu/setlocale_null.c",
+        "gnu/stat-time.c",
+        "gnu/stripslash.c",
+        "gnu/strnlen1.c",
+        "gnu/strtoll.c",
+        "gnu/strtoull.c",
+        "gnu/time_rz.c",
+        "gnu/timegm.c",
+        "gnu/timespec.c",
+        "gnu/uinttostr.c",
+        "gnu/umaxtostr.c",
+        "gnu/unistd.c",
+        "gnu/utimens.c",
+        "gnu/vasnprintf.c",
+        "gnu/version-etc-fsf.c",
+        "gnu/version-etc.c",
+        "gnu/wctype-h.c",
+        "gnu/xalloc-die.c",
+        "gnu/xgetcwd.c",
+        "gnu/xmalloc.c",
+        "gnu/xsize.c",
+    ] + glob([
+        "gnu/*.h",
+        "gnu/sys/*.h",
+        "config.h",
+    ]),
+    # gnulib instantiates several functions by textually #including a template
+    # .c into a wrapper .c (e.g. strtoll.c includes strtol.c; strtoull.c
+    # includes strtoul.c which includes strtol.c; the *tostr.c files include
+    # anytostr.c). Those templates are not standalone TUs, so they are staged as
+    # textual headers to be present in the includers' compile sandboxes.
+    textual_hdrs = [
+        "gnu/anytostr.c",
+        "gnu/fnmatch_loop.c",
+        "gnu/safe-read.c",
+        "gnu/strtoimax.c",
+        "gnu/strtol.c",
+        "gnu/strtoul.c",
+    ],
+    copts = CPIO_COPTS,
+    includes = CPIO_INCLUDES,
+    linkstatic = True,
+)
+
+# paxutils helpers -> lib/libpax.a (libpax_a_SOURCES).
+cc_library(
+    name = "pax",
+    srcs = [
+        "lib/paxerror.c",
+        "lib/paxexit.c",
+        "lib/paxexit-status.c",
+        "lib/paxnames.c",
+        "lib/rtapelib.c",
+        "lib/sysdep.c",
+    ] + glob([
+        "lib/*.h",
+        "config.h",
+    ]),
+    copts = CPIO_COPTS,
+    includes = CPIO_INCLUDES,
+    linkstatic = True,
+    deps = [":gnu"],
+)
+
+# cpio program (cpio_SOURCES; src/*.c minus mt.c).
+cc_binary(
+    name = "cpio",
+    srcs = [
+        "src/copyin.c",
+        "src/copyout.c",
+        "src/copypass.c",
+        "src/defer.c",
+        "src/dstring.c",
+        "src/fatal.c",
+        "src/filemode.c",
+        "src/global.c",
+        "src/idcache.c",
+        "src/main.c",
+        "src/makepath.c",
+        "src/tar.c",
+        "src/userspec.c",
+        "src/util.c",
+    ] + glob([
+        "src/*.h",
+        "config.h",
+    ]),
+    copts = CPIO_COPTS,
+    includes = CPIO_INCLUDES,
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":gnu",
+        ":pax",
+    ],
+)
+""",
+    patch_args = ["-p1"],
+    patches = ["//cpio:generated.patch"],
+    sha256 = "145a340fd9d55f0b84779a44a12d5f79d77c99663967f8cfa168d7905ca52454",
+    strip_prefix = "cpio-2.14",
+    urls = ["https://ftp.gnu.org/gnu/cpio/cpio-2.14.tar.gz"],
+)
+
