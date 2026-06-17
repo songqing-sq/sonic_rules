@@ -25,6 +25,16 @@ git_override(
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "bazel_lib", version = "3.1.1")
+
+# Host-tool toolchains used by //kernel:host_tools.bzl (flex/bison/m4/perl).
+# The @flex/@bison/@m4/@perl repos + toolchain registration are provided by the
+# consuming root module; these deps make the @rules_*//...:toolchain_type labels
+# resolvable from within @sonic_build_infra.
+bazel_dep(name = "rules_flex", version = "0.4")
+bazel_dep(name = "rules_bison", version = "0.4")
+bazel_dep(name = "rules_m4", version = "0.3")
+bazel_dep(name = "rules_perl", version = "1.1.0")
+
 bazel_dep(name = "rules_distroless", version = "0.0.0")
 local_path_override(
     module_name = "rules_distroless",
@@ -126,6 +136,849 @@ use_repo(apt, "sysroot-bookworm")
 
 # rules_pkg removed: sonic_deb now uses ar/tar/objcopy directly from CC toolchain
 # TODO(bazel-ready): Add auto-formatting with buildifier
+# ----------------------------------------------------------------------------
+# elfutils 0.190 — libelf + libdw hermetic native Bazel host libraries.
+#
+# Needed by pahole (@dwarves_src//:pahole), the BTF generator the kernel build
+# invokes when CONFIG_DEBUG_INFO_BTF=y. pahole links -ldw -lelf, and libdw
+# pulls in libdwfl/libebl/libdwelf/libcpu plus the per-architecture ELF
+# backends (backends/*.c), all statically linked (elfutils 0.190 dispatches
+# backends through the in-tree machines[] table, not dlopen).
+#
+# elfutils is autotools; per the autoconf reference we do NOT run ./configure.
+# config.h is hand-written below via genrule with the HAVE_* matrix valid for
+# Debian bookworm glibc x86_64 (and aarch64 — header/function availability is
+# glibc-version, not arch, dependent). SYMBOL_VERSIONING is intentionally left
+# undefined so the .symver machinery in lib/eu-config.h collapses to plain C
+# names (correct for static linking into one executable). USE_LOCKS is off
+# (configure default --disable-thread-safety). Only zlib decompression is
+# enabled (USE_ZLIB); bzip2/lzma/zstd backends are dropped (their .c files are
+# autoconf-conditional and unused for reading the kernel's zlib/uncompressed
+# DWARF). debuginfod is disabled — debuginfod-client.c compiles to a NULL stub
+# when ENABLE_LIBDEBUGINFOD is undefined.
+#
+# Generated inputs: all release-shipped generated headers (libdw/known-dwarf.h,
+# libcpu/{i386,x86_64}_dis.h, libcpu/i386_mne.h) are used as-is. Only the
+# disassembler mnemonic tables are not shipped; they are reproduced with the
+# exact upstream m4 + sed|sort pipeline (libcpu/Makefile.am rules) via genrule.
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "elfutils_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# -------- config.h (autoconf substitute) -------------------------------------
+# Hand-written HAVE_* matrix for Debian bookworm glibc. config.h.in ends with
+# `#include <eu-config.h>`, reproduced here. SYMBOL_VERSIONING / USE_LOCKS /
+# ENABLE_LIBDEBUGINFOD / USE_BZLIB / USE_LZMA / USE_ZSTD are deliberately
+# left undefined.
+genrule(
+    name = "config_h",
+    outs = ["config.h"],
+    cmd = '''cat > $@ <<'EOF'
+/* Bazel-generated config.h for elfutils 0.190 on glibc/bookworm. */
+#define PACKAGE "elfutils"
+#define PACKAGE_NAME "elfutils"
+#define PACKAGE_STRING "elfutils 0.190"
+#define PACKAGE_TARNAME "elfutils"
+#define PACKAGE_URL "http://elfutils.org/"
+#define PACKAGE_VERSION "0.190"
+#define PACKAGE_BUGREPORT "https://sourceware.org/bugzilla"
+#define VERSION "0.190"
+#define STDC_HEADERS 1
+#define HAVE_INTTYPES_H 1
+#define HAVE_STDINT_H 1
+#define HAVE_STDIO_H 1
+#define HAVE_STDLIB_H 1
+#define HAVE_STRING_H 1
+#define HAVE_STRINGS_H 1
+#define HAVE_SYS_STAT_H 1
+#define HAVE_SYS_TYPES_H 1
+#define HAVE_UNISTD_H 1
+#define HAVE_ERROR_H 1
+#define HAVE_ERR_H 1
+#define HAVE_EXECINFO_H 1
+#define HAVE_SCHED_H 1
+#define HAVE_SYS_RESOURCE_H 1
+#define HAVE_STDATOMIC_H 1
+#define HAVE_DECL_MEMRCHR 1
+#define HAVE_DECL_MEMPCPY 1
+#define HAVE_DECL_RAWMEMCHR 1
+#define HAVE_DECL_REALLOCARRAY 1
+#define HAVE_DECL_STRERROR_R 1
+#define HAVE_DECL_POWEROF2 1
+#define HAVE_GETRLIMIT 1
+#define HAVE_MREMAP 1
+#define HAVE_PROCESS_VM_READV 1
+#define HAVE_SCHED_GETAFFINITY 1
+#define HAVE_SYS_USER_REGS 1
+#define HAVE_FALLTHROUGH 1
+#define HAVE_VISIBILITY 1
+#define HAVE_GCC_STRUCT 1
+#define HAVE_STRERROR_R 1
+#define SIZEOF_LONG 8
+#define USE_ZLIB 1
+#define _GNU_SOURCE 1
+#include <eu-config.h>
+EOF''',
+)
+
+# -------- disassembler mnemonic tables (m4 + sed|sort codegen) ----------------
+# libcpu/Makefile.am: `%_defs: defs/i386` -> `m4 -D<arch> -DDISASSEMBLER` and
+# `%.mnemonics: %_defs` -> the sed | sort -u pipeline. The *_dis.h tables that
+# reference these MNE() macros are shipped pre-generated in the tarball.
+genrule(
+    name = "i386_defs",
+    srcs = ["libcpu/defs/i386"],
+    outs = ["libcpu/i386_defs"],
+    cmd = "m4 -Di386 -DDISASSEMBLER $< > $@",
+)
+
+genrule(
+    name = "x86_64_defs",
+    srcs = ["libcpu/defs/i386"],
+    outs = ["libcpu/x86_64_defs"],
+    cmd = "m4 -Dx86_64 -DDISASSEMBLER $< > $@",
+)
+
+genrule(
+    name = "i386_mnemonics",
+    srcs = [":i386_defs"],
+    outs = ["libcpu/i386.mnemonics"],
+    cmd = "sed '1,/^%%/d;/^#/d;/^[[:space:]]*$$/d;s/[^:]*:\\\\([^[:space:]]*\\\\).*/MNE(\\\\1)/;s/{[^}]*}//g;/INVALID/d' $< | sort -u > $@",
+)
+
+genrule(
+    name = "x86_64_mnemonics",
+    srcs = [":x86_64_defs"],
+    outs = ["libcpu/x86_64.mnemonics"],
+    cmd = "sed '1,/^%%/d;/^#/d;/^[[:space:]]*$$/d;s/[^:]*:\\\\([^[:space:]]*\\\\).*/MNE(\\\\1)/;s/{[^}]*}//g;/INVALID/d' $< | sort -u > $@",
+)
+
+# -------- internal headers visible to every elfutils TU ----------------------
+# Reproduces the base AM_CPPFLAGS (-I. -Ilib -I<own dir> -I sibling libs).
+# config.h lives at the repo root; lib/ supplies eu-config.h / system.h; the
+# per-lib dirs supply the *P.h private headers and the public headers that the
+# .c files include flat (<libdw.h>, <gelf.h>, <dwarf.h>, <libasm.h> ...).
+cc_library(
+    name = "internal_hdrs",
+    hdrs = glob([
+        "lib/*.h",
+        "libelf/*.h",
+        "libdw/*.h",
+        "libdwfl/*.h",
+        "libdwelf/*.h",
+        "libebl/*.h",
+        "libcpu/*.h",
+        "libasm/*.h",
+        "backends/*.h",
+    ]) + [":config_h"],
+    # lib/dynamicsizehash{,_concurrent}.c are hash-table templates textually
+    # #included (e.g. libdw/dwarf_abbrev_hash.c does
+    # #include <dynamicsizehash_concurrent.c>), never compiled standalone.
+    textual_hdrs = [
+        "lib/dynamicsizehash.c",
+        "lib/dynamicsizehash_concurrent.c",
+    ],
+    includes = [
+        ".",
+        "lib",
+        "libelf",
+        "libdw",
+        "libdwfl",
+        "libdwelf",
+        "libebl",
+        "libcpu",
+        "libasm",
+        "backends",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+EU_COPTS = [
+    "-DHAVE_CONFIG_H",
+    "-D_GNU_SOURCE",
+    "-D_FILE_OFFSET_BITS=64",
+    "-D_LARGEFILE64_SOURCE",
+    "-std=gnu99",
+    "-Wno-error",
+    "-Wno-unused-parameter",
+    "-Wno-unused-result",
+    "-Wno-sign-compare",
+    "-Wno-implicit-fallthrough",
+    "-Wno-deprecated-declarations",
+    "-Wno-pointer-arith",
+]
+
+# -------- libelf -------------------------------------------------------------
+# elf64_*.c textually #include the sibling elf32_*.c (the LIBELFBITS pattern:
+# the same .c yields the 32-bit instantiation when compiled standalone and the
+# 64-bit one when #included with LIBELFBITS=64). Bazel stages only the TU being
+# compiled plus declared headers, so the elf32_*.c are listed as textual_hdrs
+# (for the 64-bit #include) and compiled standalone via the :elf32 target.
+ELF32_BITS_SRCS = [
+    "libelf/elf32_checksum.c",
+    "libelf/elf32_fsize.c",
+    "libelf/elf32_getchdr.c",
+    "libelf/elf32_getehdr.c",
+    "libelf/elf32_getphdr.c",
+    "libelf/elf32_getshdr.c",
+    "libelf/elf32_newehdr.c",
+    "libelf/elf32_newphdr.c",
+    "libelf/elf32_offscn.c",
+    "libelf/elf32_updatefile.c",
+    "libelf/elf32_updatenull.c",
+    "libelf/elf32_xlatetof.c",
+    "libelf/elf32_xlatetom.c",
+]
+
+cc_library(
+    name = "elf32",
+    srcs = ELF32_BITS_SRCS,
+    copts = EU_COPTS,
+    linkstatic = True,
+    visibility = ["//visibility:private"],
+    deps = [":internal_hdrs", "@zlib_src//:z"],
+)
+
+cc_library(
+    name = "elf",
+    srcs = glob(["libelf/*.c"], exclude = ELF32_BITS_SRCS),
+    copts = EU_COPTS,
+    linkstatic = True,
+    # libelf_next_prime.c / libelf_crc32.c textually #include "../lib/*.c".
+    textual_hdrs = ELF32_BITS_SRCS + [
+        "lib/next_prime.c",
+        "lib/crc32.c",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":internal_hdrs", ":elf32", "@zlib_src//:z"],
+)
+
+# -------- dual-role / textual-only backend & libcpu sources ------------------
+# eblopenbackend.c's machines[] table names every <arch>_init, so all backends
+# must link or the static link fails on undefined symbols (they are compiled
+# into :dw below).
+#
+# Textual-only backend .c (noinst_HEADERS): common-reloc.c, linux-core-note.c,
+# x86_corenote.c — #included, never compiled standalone.
+#
+# Dual-role backend .c: the base-width *_corenote.c are compiled standalone AND
+# #included by their wider sibling (e.g. ppc64_corenote.c #includes
+# ppc_corenote.c). They are compiled in :ebl_corenote and exposed as
+# textual_hdrs of :dw for the sibling #include. None of them reference libdw
+# symbols, so :ebl_corenote does not create a libdw<->libebl cycle.
+EBL_CORENOTE_DUAL = [
+    "backends/ppc_corenote.c",
+    "backends/riscv_corenote.c",
+    "backends/s390_corenote.c",
+    "backends/sparc_corenote.c",
+    "backends/x86_64_corenote.c",
+]
+
+# common-reloc.c does `#include RELOC_TYPES` -> "<arch>_reloc.def"; the 17
+# *_reloc.def files are EXTRA_DIST (shipped), textually #included per backend
+# and added to textual_hdrs below.
+EBL_TEXTUAL_ONLY = [
+    "backends/common-reloc.c",
+    "backends/linux-core-note.c",
+    "backends/x86_corenote.c",
+]
+
+EBL_TEXTUAL_HDRS = EBL_TEXTUAL_ONLY + EBL_CORENOTE_DUAL + glob(["backends/*_reloc.def"])
+
+# i386_disasm.c is compiled standalone here (32-bit disassembler) and is also
+# textually #included by x86_64_disasm.c (compiled in :dw). It pulls the
+# mnemonic tables via i386_mne.h. The disassembler has no libdw references.
+cc_library(
+    name = "cpu",
+    srcs = ["libcpu/i386_disasm.c"],
+    copts = EU_COPTS,
+    linkstatic = True,
+    textual_hdrs = [
+        ":i386_mnemonics",
+        ":x86_64_mnemonics",
+    ],
+    deps = [":internal_hdrs"],
+)
+
+cc_library(
+    name = "ebl_corenote",
+    srcs = EBL_CORENOTE_DUAL,
+    copts = EU_COPTS,
+    linkstatic = True,
+    textual_hdrs = EBL_TEXTUAL_HDRS,
+    visibility = ["//visibility:private"],
+    deps = [":internal_hdrs"],
+)
+
+# -------- libdw + libdwfl + libdwelf + libebl + backends + libcpu ------------
+# libdw and libebl/backends are mutually dependent (backend retval/cfi code
+# calls dwarf_peel_type / dwarf_aggregate_size, while libdw dispatches through
+# the EBL backends). Upstream resolves this by linking libebl + the backends
+# into libdw.so with --whole-archive. With static cc_library archives a
+# two-target cycle cannot be resolved in a single link pass, so libebl, the
+# backends, libcpu and libeu are compiled into this one :dw archive — matching
+# the upstream libdw.so composition.
+#
+# bzip2.c / lzma.c / zstd.c are autoconf-conditional (BZLIB/LZMA/ZSTD) and
+# omitted; gzip.c provides the zlib path consumed for SHF_COMPRESSED debug
+# sections.
+cc_library(
+    name = "dw",
+    srcs = glob(["libdw/*.c", "libdwelf/*.c", "libebl/*.c"]) + glob(
+        ["libdwfl/*.c"],
+        exclude = [
+            "libdwfl/bzip2.c",
+            "libdwfl/lzma.c",
+            "libdwfl/zstd.c",
+        ],
+    ) + glob(
+        ["backends/*.c"],
+        # The dual-role *_corenote.c (EBL_CORENOTE_DUAL) are compiled in
+        # :ebl_corenote and also #included by their wider sibling, so they are
+        # textual_hdrs here, not srcs.
+        exclude = EBL_TEXTUAL_ONLY + EBL_CORENOTE_DUAL,
+    ) + [
+        # libcpu disasm: i386_disasm.c is compiled in :cpu (and #included by
+        # x86_64_disasm.c), so only the other three are compiled here.
+        "libcpu/x86_64_disasm.c",
+        "libcpu/bpf_disasm.c",
+        "libcpu/riscv_disasm.c",
+        "lib/xasprintf.c",
+        "lib/xstrdup.c",
+        "lib/xstrndup.c",
+        "lib/xmalloc.c",
+        "lib/next_prime.c",
+        "lib/crc32.c",
+        "lib/crc32_file.c",
+        "lib/color.c",
+        "lib/error.c",
+        "lib/printversion.c",
+    ],
+    copts = EU_COPTS,
+    linkopts = ["-lpthread"],
+    linkstatic = True,
+    # Cross-directory / per-arch textual .c includes: libdwfl_crc32{,_file}.c
+    # pull ../lib/crc32{,_file}.c; x86_64_disasm.c pulls i386_disasm.c + the
+    # mnemonics; the backends pull common-reloc.c / *_reloc.def / the dual
+    # *_corenote.c / x86_corenote.c.
+    textual_hdrs = [
+        "lib/crc32.c",
+        "lib/crc32_file.c",
+        "libcpu/i386_disasm.c",
+        ":i386_mnemonics",
+        ":x86_64_mnemonics",
+    ] + EBL_TEXTUAL_HDRS,
+    visibility = ["//visibility:public"],
+    deps = [":internal_hdrs", ":elf", ":cpu", ":ebl_corenote", "@zlib_src//:z"],
+)
+
+# -------- public headers for downstream consumers (dwarves) ------------------
+# dwarves includes <elfutils/libdwfl.h>, <elfutils/version.h>, <dwarf.h> and
+# (flat) <gelf.h>/<libelf.h>. The elfutils/-prefixed set is exposed via a
+# generated copy under an elfutils/ subdir; the flat headers come from the
+# libdw/libelf include dirs.
+genrule(
+    name = "elfutils_pub_hdrs",
+    srcs = [
+        "libdwfl/libdwfl.h",
+        "version.h",
+        "libdw/libdw.h",
+    ],
+    outs = [
+        "pub/elfutils/libdwfl.h",
+        "pub/elfutils/version.h",
+        "pub/elfutils/libdw.h",
+    ],
+    cmd = "mkdir -p $(RULEDIR)/pub/elfutils && " +
+          "cp $(location libdwfl/libdwfl.h) $(RULEDIR)/pub/elfutils/libdwfl.h && " +
+          "cp $(location version.h) $(RULEDIR)/pub/elfutils/version.h && " +
+          "cp $(location libdw/libdw.h) $(RULEDIR)/pub/elfutils/libdw.h",
+)
+
+cc_library(
+    name = "headers_pub",
+    hdrs = [
+        ":elfutils_pub_hdrs",
+        "libdw/dwarf.h",
+        "libdw/known-dwarf.h",
+        "libdw/libdw.h",
+        "libelf/libelf.h",
+        "libelf/gelf.h",
+        "libelf/elf.h",
+        "libdwfl/libdwfl.h",
+    ],
+    includes = [
+        "pub",
+        "libdw",
+        "libelf",
+        "libdwfl",
+    ],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "8e00a3a9b5f04bc1dc273ae86281d2d26ed412020b391ffcc23198f10231d692",
+    strip_prefix = "elfutils-0.190",
+    urls = ["https://sourceware.org/elfutils/ftp/0.190/elfutils-0.190.tar.bz2"],
+)
+
+# ----------------------------------------------------------------------------
+# libbpf 1.3.0 — hermetic native Bazel host library for pahole's BTF encoder.
+#
+# dwarves bundles libbpf as a git submodule (lib/bpf); the release tarball does
+# not ship submodule contents, so libbpf is fetched and built separately here
+# (a version compatible with dwarves v1.27). libbpf depends on libelf and zlib.
+# It is a plain set of .c files with no generated config header
+# (src/libbpf_version.h is shipped). The bundled include/uapi/linux/*.h supply
+# the newer kernel UAPI (e.g. struct btf_enum64) and include/linux/*.h supply
+# the kernel-compat wrappers; both are PRIVATE to libbpf's own TUs. Only the
+# install layout — public headers under a bpf/ prefix and the uapi headers —
+# is re-exported to dwarves, which must NOT see include/linux/types.h (it would
+# clash with dwarves' own list.h struct list_head).
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "libbpf_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# libbpf's private compile-time headers staged into a virtual include root via
+# strip_include_prefix. They are listed in :bpf's own srcs (so they are present
+# in the sandbox) and the include dirs are supplied through :bpf's NON-PROPAGATING
+# copts below — deliberately NOT via the `includes` attribute, because that would
+# leak include/linux/types.h (which defines `struct list_head`) onto every
+# consumer's search path and clash with dwarves' own list.h. pahole instead
+# resolves <linux/types.h> from the sysroot (uapi, no list_head) and gets only
+# the newer <linux/btf.h> from the safe :bpf_uapi_hdrs (include/uapi).
+filegroup(
+    name = "bpf_private_hdrs",
+    srcs = glob([
+        "include/*.h",
+        "include/uapi/linux/*.h",
+        "include/linux/*.h",
+        "include/asm/*.h",
+        "src/*.h",
+    ]),
+    visibility = ["//visibility:private"],
+)
+
+cc_library(
+    name = "bpf",
+    srcs = glob(["src/*.c"]) + [":bpf_private_hdrs"],
+    copts = [
+        "-D_GNU_SOURCE",
+        "-D_LARGEFILE64_SOURCE",
+        "-D_FILE_OFFSET_BITS=64",
+        "-std=gnu89",
+        "-Wno-error",
+        "-Wno-unused-parameter",
+        "-Wno-sign-compare",
+        # Non-propagating include dirs (copts, not `includes`) so libbpf's
+        # private include/linux wrappers never reach consumers like pahole.
+        "-Iexternal/sonic-build-infra++_repo_rules2+libbpf_src/src",
+        "-Iexternal/sonic-build-infra++_repo_rules2+libbpf_src/include",
+        "-Iexternal/sonic-build-infra++_repo_rules2+libbpf_src/include/uapi",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "@elfutils_src//:elf",
+        "@zlib_src//:z",
+    ],
+)
+
+# Public consumer headers under a bpf/ prefix (the install_headers layout).
+# Exposed to dwarves as <bpf/btf.h>, <bpf/libbpf.h>, ...
+cc_library(
+    name = "bpf_pub_hdrs",
+    hdrs = glob(["src/*.h"]),
+    strip_include_prefix = "src",
+    include_prefix = "bpf",
+    visibility = ["//visibility:private"],
+)
+
+# The bundled uapi (include/uapi) for the newer <linux/btf.h> (struct
+# btf_enum64). include/linux (the kernel-compat wrapper headers) is deliberately
+# NOT on the include path — it would clash with dwarves' own list.h.
+cc_library(
+    name = "bpf_uapi_hdrs",
+    hdrs = glob(["include/uapi/linux/*.h"]),
+    includes = ["include/uapi"],
+    visibility = ["//visibility:private"],
+)
+
+cc_library(
+    name = "bpf_hdrs",
+    visibility = ["//visibility:public"],
+    deps = [":bpf_pub_hdrs", ":bpf_uapi_hdrs"],
+)
+""",
+    sha256 = "11db86acd627e468bc48b7258c1130aba41a12c4d364f78e184fd2f5a913d861",
+    strip_prefix = "libbpf-1.3.0",
+    urls = ["https://github.com/libbpf/libbpf/archive/refs/tags/v1.3.0.tar.gz"],
+)
+
+# ----------------------------------------------------------------------------
+# dwarves 1.27 — the pahole host binary (BTF generator for the kernel build).
+#
+# When CONFIG_DEBUG_INFO_BTF=y the kernel build runs pahole to turn DWARF into
+# BTF. dwarves is CMake; per the cmake-config reference we do NOT run cmake.
+# The only generated file is config.h, whose sole entry is
+# HAVE_DWFL_MODULE_BUILD_ID — defined here because the bundled elfutils libdwfl
+# provides dwfl_module_build_id. DWARVES_{MAJOR,MINOR}_VERSION come from the
+# add_definitions() in CMakeLists.txt.
+#
+# The :pahole source list mirrors CMakeLists.txt exactly: pahole.c +
+# add_library(dwarves ...) sources + dwarves_emit.c + dwarves_reorganize.c.
+# pahole links libdw + libelf + libbpf + zlib + pthread (argp and obstack come
+# from glibc).
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "dwarves_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+genrule(
+    name = "config_h",
+    outs = ["config.h"],
+    cmd = "echo '#define HAVE_DWFL_MODULE_BUILD_ID 1' > $@",
+)
+
+cc_binary(
+    name = "pahole",
+    srcs = [
+        "pahole.c",
+        # add_library(dwarves ...) from CMakeLists.txt
+        "dwarves.c",
+        "dwarves_fprintf.c",
+        "gobuffer.c",
+        "ctf_loader.c",
+        "libctf.c",
+        "btf_encoder.c",
+        "btf_loader.c",
+        "dwarf_loader.c",
+        "dutil.c",
+        "elf_symtab.c",
+        "rbtree.c",
+        # dwarves_emit / dwarves_reorganize libraries
+        "dwarves_emit.c",
+        "dwarves_reorganize.c",
+        # private headers
+        "dwarves.h",
+        "dwarves_emit.h",
+        "dwarves_reorganize.h",
+        "dutil.h",
+        "gobuffer.h",
+        "list.h",
+        "hash.h",
+        "rbtree.h",
+        "btf_encoder.h",
+        "ctf.h",
+        "ctf_encoder.h",
+        "elf_symtab.h",
+        "elfcreator.h",
+        "libctf.h",
+        ":config_h",
+    ],
+    copts = [
+        "-D_GNU_SOURCE",
+        "-DDWARVES_MAJOR_VERSION=1",
+        "-DDWARVES_MINOR_VERSION=27",
+        "-D_LARGEFILE64_SOURCE",
+        "-D_FILE_OFFSET_BITS=64",
+        "-I.",
+        "-Wno-error",
+        "-Wno-unused-parameter",
+        "-Wno-sign-compare",
+        "-Wno-implicit-fallthrough",
+    ],
+    includes = ["."],
+    linkopts = [
+        "-lpthread",
+        "-lm",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "@elfutils_src//:dw",
+        "@elfutils_src//:elf",
+        "@elfutils_src//:headers_pub",
+        "@libbpf_src//:bpf",
+        "@libbpf_src//:bpf_hdrs",
+        "@zlib_src//:z",
+    ],
+)
+""",
+    sha256 = "e350510713f4a38d1402f540e005a67fa1d62febfa45eed1fcbc04ea34ae725d",
+    strip_prefix = "dwarves-1.27",
+    urls = ["https://github.com/acmel/dwarves/archive/refs/tags/v1.27.tar.gz"],
+)
+
+# ----------------------------------------------------------------------------
+# bc 7.0.3 (gavinhoward) — hermetic native Bazel host tool.
+#
+# Kbuild uses `bc` for integer arithmetic in a handful of scripts (e.g.
+# kernel/time/timeconst.bc). bc is NOT autotools; its custom configure.sh
+# normally generates a Makefile and embeds the bc math libraries (gen/*.bc)
+# and help text (gen/*.txt) into C source via the gen/strgen.c codegen tool.
+# That codegen is reproduced here: strgen is built as a tiny host cc_binary
+# and run via genrules with the EXACT argument vectors from the upstream
+# Makefile.in (strgen <input> <output> <exclude> <name> [label [define
+# [remove_tabs]]]). The resulting lib.c/lib2.c/bc_help.c/dc_help.c are linked
+# as ordinary objects (they define the bc_lib/bc_lib2/bc_help/dc_help symbols
+# that src/data.c declares extern).
+#
+# Config is a minimal `bc` build: history and NLS disabled (no readline /
+# editline / libintl), extra math enabled (lib2.bc). The -D set and the
+# numeric DEFAULT_* values are exactly those configure.sh emits for the
+# default build type, with BC_ENABLE_HISTORY=0 and BC_ENABLE_NLS=0.
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "bc_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+# Compile-time -D macro set shared by strgen and bc. Mirrors the resolved
+# CFLAGS from the upstream-generated Makefile, minus history/NLS.
+BC_COPTS = [
+    "-DBC_ENABLED=1",
+    "-DDC_ENABLED=1",
+    "-DBUILD_TYPE=A",
+    "-DBC_NUM_KARATSUBA_LEN=32",
+    "-DBC_ENABLE_NLS=0",
+    "-DBC_ENABLE_EXTRA_MATH=1",
+    "-DBC_ENABLE_HISTORY=0",
+    "-DBC_ENABLE_LIBRARY=0",
+    "-DBC_ENABLE_MEMCHECK=0",
+    "-DBC_ENABLE_AFL=0",
+    "-DBC_ENABLE_OSSFUZZ=0",
+    "-DBC_DEFAULT_BANNER=0",
+    "-DBC_DEFAULT_SIGINT_RESET=1",
+    "-DBC_DEFAULT_TTY_MODE=1",
+    "-DBC_DEFAULT_PROMPT=1",
+    "-DBC_DEFAULT_EXPR_EXIT=1",
+    "-DBC_DEFAULT_DIGIT_CLAMP=0",
+    "-DDC_DEFAULT_SIGINT_RESET=1",
+    "-DDC_DEFAULT_TTY_MODE=0",
+    "-DDC_DEFAULT_PROMPT=0",
+    "-DDC_DEFAULT_EXPR_EXIT=1",
+    "-DDC_DEFAULT_DIGIT_CLAMP=0",
+    "-DNDEBUG",
+    "-DBC_ENABLE_EDITLINE=0",
+    "-DBC_ENABLE_READLINE=0",
+    "-D_POSIX_C_SOURCE=200809L",
+    "-D_XOPEN_SOURCE=700",
+]
+
+# strgen: the gen/ codegen host tool that embeds .bc / .txt files as C arrays.
+cc_binary(
+    name = "strgen",
+    srcs = ["gen/strgen.c"],
+    copts = BC_COPTS,
+    includes = ["include"],
+    # status.h (pulled in by strgen.c) lives in include/.
+    deps = [":bc_headers"],
+)
+
+cc_library(
+    name = "bc_headers",
+    hdrs = glob(["include/*.h"]),
+    includes = ["include"],
+)
+
+# Generated C sources. Argument vectors are taken verbatim from the upstream
+# Makefile.in strgen recipes (exclude=0 -> keep extra-math sections).
+genrule(
+    name = "gen_lib_c",
+    srcs = ["gen/lib.bc"],
+    outs = ["lib.c"],
+    tools = [":strgen"],
+    cmd = "$(location :strgen) $(location gen/lib.bc) $@ 0 bc_lib bc_lib_name BC_ENABLED 1",
+)
+
+genrule(
+    name = "gen_lib2_c",
+    srcs = ["gen/lib2.bc"],
+    outs = ["lib2.c"],
+    tools = [":strgen"],
+    cmd = "$(location :strgen) $(location gen/lib2.bc) $@ 0 bc_lib2 bc_lib2_name 'BC_ENABLED && BC_ENABLE_EXTRA_MATH' 1",
+)
+
+genrule(
+    name = "gen_bc_help_c",
+    srcs = ["gen/bc_help.txt"],
+    outs = ["bc_help.c"],
+    tools = [":strgen"],
+    cmd = "$(location :strgen) $(location gen/bc_help.txt) $@ 0 bc_help '' BC_ENABLED 0",
+)
+
+genrule(
+    name = "gen_dc_help_c",
+    srcs = ["gen/dc_help.txt"],
+    outs = ["dc_help.c"],
+    tools = [":strgen"],
+    cmd = "$(location :strgen) $(location gen/dc_help.txt) $@ 0 dc_help '' DC_ENABLED 0",
+)
+
+cc_binary(
+    name = "bc",
+    srcs = glob(
+        ["src/*.c"],
+        exclude = ["src/bc_fuzzer.c", "src/dc_fuzzer.c"],
+    ) + [
+        "lib.c",
+        "lib2.c",
+        "bc_help.c",
+        "dc_help.c",
+    ],
+    copts = BC_COPTS,
+    includes = ["include"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [":bc_headers"],
+)
+""",
+    sha256 = "91eb74caed0ee6655b669711a4f350c25579778694df248e28363318e03c7fc4",
+    strip_prefix = "bc-7.0.3",
+    urls = ["https://github.com/gavinhoward/bc/releases/download/7.0.3/bc-7.0.3.tar.xz"],
+)
+
+# ----------------------------------------------------------------------------
+# kmod 34 — hermetic native Bazel host tool (depmod).
+#
+# `make modules_install` runs depmod to build modules.dep/.alias/.symbols/...
+# The kernel config is CONFIG_MODULE_COMPRESS_NONE=y (uncompressed .ko) and
+# CONFIG_MODULE_SIG_ALL is unset (no build-time signing), so depmod needs no
+# compression (zlib/xz/zstd) and no crypto (openssl) — all disabled here.
+#
+# kmod is autotools; per the autoconf reference we do NOT run ./configure.
+# config.h is generated by a heredoc genrule with the HAVE_*/ENABLE_* values
+# valid for Debian bookworm glibc x86_64. Presence-style macros (tested with
+# #ifndef / #ifdef / defined()) are defined to 1 only when the feature exists
+# and OMITTED otherwise (HAVE_FINIT_MODULE is omitted so shared/missing.h
+# supplies the syscall() wrapper — glibc here has no finit_module() symbol).
+# Value-style macros (tested with #if VALUE: HAVE_DECL_BASENAME and the
+# __builtin_*_overflow set) are always defined.
+#
+# kmod 34 ships a single multi-call `kmod` binary; depmod/insmod/modprobe/...
+# are argv[0] dispatches. The exposed :depmod target is that binary renamed to
+# `depmod`, so invoking it dispatches to the depmod applet.
+#
+# Source lists are taken verbatim from the upstream Makefile.am
+# (shared_libshared_la_SOURCES, libkmod_libkmod_la_SOURCES base list with the
+# compression files excluded, and tools_kmod_SOURCES).
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "kmod_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+genrule(
+    name = "config_h",
+    outs = ["config.h"],
+    cmd = '''cat > $@ <<'EOF'
+/* Bazel-generated config.h for kmod 34 on glibc/bookworm x86_64. */
+#ifndef KMOD_CONFIG_H
+#define KMOD_CONFIG_H
+#define PACKAGE "kmod"
+#define VERSION "34"
+#define ENABLE_ZSTD 0
+#define ENABLE_ZSTD_DLOPEN 0
+#define ENABLE_XZ 0
+#define ENABLE_XZ_DLOPEN 0
+#define ENABLE_ZLIB 0
+#define ENABLE_ZLIB_DLOPEN 0
+#define ENABLE_OPENSSL 0
+#define ENABLE_LOGGING 1
+#define ENABLE_DEBUG 0
+#define ENABLE_ELFDBG 0
+#define HAVE_SECURE_GETENV 1
+#define HAVE_STATIC_ASSERT 1
+#define HAVE_NORETURN 1
+#define HAVE_STRUCT_STAT_ST_MTIM 1
+#define HAVE_DECL_BASENAME 1
+#define HAVE___BUILTIN_UADD_OVERFLOW 1
+#define HAVE___BUILTIN_UADDL_OVERFLOW 1
+#define HAVE___BUILTIN_UADDLL_OVERFLOW 1
+#define HAVE___BUILTIN_UMUL_OVERFLOW 1
+#define HAVE___BUILTIN_UMULL_OVERFLOW 1
+#define HAVE___BUILTIN_UMULLL_OVERFLOW 1
+#define KMOD_FEATURES ""
+#endif
+EOF''',
+)
+
+KMOD_COPTS = [
+    "-include", "config.h",
+    "-D_GNU_SOURCE",
+    '-DSYSCONFDIR=\\\\"/etc\\\\"',
+    '-DDISTCONFDIR=\\\\"/usr/lib\\\\"',
+    '-DMODULE_DIRECTORY=\\\\"/lib/modules\\\\"',
+    "-Wno-implicit-fallthrough",
+]
+
+# shared/libshared + libkmod (base list: no xz/zlib/zstd compression files,
+# no openssl) compiled as a single internal cc_library.
+cc_library(
+    name = "kmod_internal",
+    srcs = [
+        # shared_libshared_la_SOURCES
+        "shared/array.c",
+        "shared/hash.c",
+        "shared/strbuf.c",
+        "shared/util.c",
+        # libkmod_libkmod_la_SOURCES (base, ENABLE_* off)
+        "libkmod/libkmod-builtin.c",
+        "libkmod/libkmod.c",
+        "libkmod/libkmod-config.c",
+        "libkmod/libkmod-elf.c",
+        "libkmod/libkmod-file.c",
+        "libkmod/libkmod-index.c",
+        "libkmod/libkmod-list.c",
+        "libkmod/libkmod-module.c",
+        "libkmod/libkmod-signature.c",
+    ] + glob([
+        "shared/*.h",
+        "libkmod/*.h",
+    ]) + [":config_h"],
+    copts = KMOD_COPTS,
+    includes = ["."],
+    linkstatic = True,
+)
+
+# tools_kmod_SOURCES -> the multi-call kmod binary, exposed as `depmod`
+# (argv[0] dispatch selects the depmod applet).
+cc_binary(
+    name = "depmod",
+    srcs = [
+        "tools/depmod.c",
+        "tools/insmod.c",
+        "tools/kmod.c",
+        "tools/kmod.h",
+        "tools/log.c",
+        "tools/log.h",
+        "tools/lsmod.c",
+        "tools/modinfo.c",
+        "tools/modprobe.c",
+        "tools/opt.c",
+        "tools/opt.h",
+        "tools/rmmod.c",
+        "tools/static-nodes.c",
+        ":config_h",
+    ],
+    copts = KMOD_COPTS,
+    includes = ["."],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [":kmod_internal"],
+)
+""",
+    sha256 = "cb47be49366b596e4554eeeb7595b128feb261619c7675603e004b07c5ebbd5b",
+    strip_prefix = "kmod-34",
+    urls = ["https://github.com/kmod-project/kmod/archive/refs/tags/v34.tar.gz"],
+)
+
 # ----------------------------------------------------------------------------
 # GNU cpio 2.14 — hermetic native Bazel host tool.
 #

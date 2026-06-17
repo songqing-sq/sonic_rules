@@ -1,0 +1,57 @@
+# Public aliases to the native host tools required by the SONiC kernel build.
+#
+# The underlying repos (@bc_src, @kmod_src, @cpio_src, @dwarves_src and their
+# elfutils/libbpf deps) are created via use_repo_rule in this module's
+# MODULE.bazel, so they are only visible from within @sonic_build_infra. These
+# aliases re-export the tool binaries so @sonic-linux-kernel's kernel_build
+# action (which shells out to `make`) can depend on them as exec-cfg tools.
+
+package(default_visibility = ["//visibility:public"])
+
+alias(
+    name = "bc",
+    actual = "@bc_src//:bc",
+)
+
+alias(
+    name = "depmod",
+    actual = "@kmod_src//:depmod",
+)
+
+alias(
+    name = "cpio",
+    actual = "@cpio_src//:cpio",
+)
+
+alias(
+    name = "pahole",
+    actual = "@dwarves_src//:pahole",
+)
+
+# GNU make 4.4.1, source-compiled native cc_binary (see @make_src in
+# MODULE.bazel). The kernel build + config action shell out to this `$MAKE`
+# instead of a host /usr/bin/make.
+alias(
+    name = "make",
+    actual = "@make_src//:make",
+)
+
+# --- Source-built host libraries (CcInfo cc_library targets) ---
+# Re-exported so @sonic-linux-kernel's host_tools.bzl can inject their headers
+# and static archives into the kernel build/config actions via C_INCLUDE_PATH /
+# LIBRARY_PATH. libelf + libdw are needed by objtool/sorttable/resolve_btfids;
+# zlib by the SHF_COMPRESSED debug-section path.
+alias(
+    name = "elf",
+    actual = "@elfutils_src//:elf",
+)
+
+alias(
+    name = "dw",
+    actual = "@elfutils_src//:dw",
+)
+
+alias(
+    name = "z",
+    actual = "@zlib_src//:z",
+)
