@@ -27,8 +27,9 @@ def _download_gcc(rctx):
     )
     rctx.delete("sysroot")
     rctx.file("BUILD.bazel", rctx.read(rctx.attr.build_file))
-    rctx.file("bin/x86_64-linux-gcc-wrapped", GCC, executable = True)
-    rctx.file("bin/x86_64-linux-g++-wrapped", GCC, executable = True)
+    prefix = rctx.attr.prefix
+    rctx.file("bin/{}-gcc-wrapped".format(prefix), GCC, executable = True)
+    rctx.file("bin/{}-g++-wrapped".format(prefix), GCC, executable = True)
 
 fetch_gcc = repository_rule(
     implementation = _download_gcc,
@@ -36,5 +37,6 @@ fetch_gcc = repository_rule(
         "urls": attr.string_list(),
         "integrity": attr.string(),
         "build_file": attr.label(default = "//toolchains/gcc:gcc.BUILD"),
+        "prefix": attr.string(default = "x86_64-linux"),
     },
 )

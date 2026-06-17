@@ -13,6 +13,7 @@
 # limitations under the License.
 
 load("@rules_cc//cc/toolchains:args.bzl", "cc_args")
+load("@rules_cc//cc/toolchains:feature.bzl", "cc_feature")
 
 cc_args(
     name = "warnings",
@@ -37,6 +38,49 @@ cc_args(
         "-no-canonical-prefixes",
         "-fno-canonical-system-headers",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_args(
+    name = "opt_compile_flags",
+    actions = [
+        "@rules_cc//cc/toolchains/actions:c_compile",
+        "@rules_cc//cc/toolchains/actions:cpp_compile_actions",
+    ],
+    args = [
+        "-g",
+        "-O2",
+        "-D_FORTIFY_SOURCE=1",
+        "-DNDEBUG",
+        "-ffunction-sections",
+        "-fdata-sections",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_feature(
+    name = "opt_compile_flags_feature",
+    args = [":opt_compile_flags"],
+    overrides = "@rules_cc//cc/toolchains/features:opt",
+    visibility = ["//visibility:public"],
+)
+
+cc_args(
+    name = "dbg_compile_flags",
+    actions = [
+        "@rules_cc//cc/toolchains/actions:c_compile",
+        "@rules_cc//cc/toolchains/actions:cpp_compile_actions",
+    ],
+    args = [
+        "-g",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_feature(
+    name = "dbg_compile_flags_feature",
+    args = [":dbg_compile_flags"],
+    overrides = "@rules_cc//cc/toolchains/features:dbg",
     visibility = ["//visibility:public"],
 )
 

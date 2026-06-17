@@ -36,9 +36,10 @@ bazel_dep(name = "rules_m4", version = "0.3")
 bazel_dep(name = "rules_perl", version = "1.1.0")
 
 bazel_dep(name = "rules_distroless", version = "0.0.0")
-local_path_override(
+git_override(
     module_name = "rules_distroless",
-    path = "../../bazel-contrib/rules_distroless",
+    commit = "815b4b3",
+    remote = "https://github.com/songqing-sq/rules_distroless.git",
 )
 
 fetch_gcc = use_repo_rule("//toolchains/gcc:gcc.bzl", "fetch_gcc")
@@ -55,32 +56,48 @@ fetch_gcc(
 #     urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-14.3.0-x86_64.tar.xz"],
 # )
 
-register_toolchains("//toolchains/gcc:host_gcc_toolchain")
+fetch_gcc(
+    name = "gcc-linux-aarch64",
+    integrity = "sha256-ew4lEzqY1EtkipJboR9ko63EcOh2aK+Aziw684nr6b4=",
+    urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-12.5.0-aarch64.tar.xz"],
+    prefix = "aarch64-linux",
+)
+
+register_toolchains(
+    "//toolchains/gcc:linux_x86_64",
+    "//toolchains/gcc:cross_aarch64",
+)
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
+
+# NOTE: sources are keyed by suite in rules_distroless, so the same suite must
+# declare every architecture in one sources_list. Splitting amd64/arm64 into
+# separate tags would let the later one overwrite the former, and since
+# apt.install derives target architectures from the suite's sources, the
+# dependency set would collapse onto a single (the last-declared) architecture.
 apt.sources_list(
-    architectures = ["amd64"],
+    architectures = ["amd64", "arm64"],
     components = ["main"],
-    suites = [
-        "bookworm",
-        "bookworm-updates",
-    ],
-    uris = ["https://sonic-build.alibaba-inc.com/debian_snapshot/20260410"],
+    suites = ["bookworm", "bookworm-updates"],
+    uris = ["https://snapshot.debian.org/archive/debian/20260409T202916Z"],
 )
 apt.sources_list(
-    architectures = ["amd64"],
+    architectures = ["amd64", "arm64"],
     components = ["main"],
     suites = ["bookworm-security"],
-    uris = ["https://sonic-build.alibaba-inc.com/debian_snapshot/20260410"],
+    uris = ["https://snapshot.debian.org/archive/debian-security/20260409T182303Z"],
 )
+
+# Single multi-arch sysroot. The generated @sysroot-bookworm//:directory
+# select()s the right packages from the target platform's CPU constraint, so
+# one set serves both the x86_64 and aarch64 cc toolchains.
 apt.install(
     dependency_set = "sysroot-bookworm",
-    packages = [
-        "libc6-dev",
-        #"libgcc-12-dev",
-        #"libstdc++-12-dev",
-        "libstdc++6",
-        "linux-libc-dev",
+    packages = ["libc6-dev", "libstdc++6", "linux-libc-dev"],
+    suites = ["bookworm", "bookworm-updates", "bookworm-security"],
+)
+
+use_repo(apt, "sysroot-bookworm")
 
 # pip hub for build-time Python tools (e.g. the jinja2 renderer). Declared in
 # this module so targets under @sonic_build_infra can depend on @pip_tools//...
@@ -91,18 +108,6 @@ uv.declare_hub(hub_name = "pip_tools")
 uv.declare_venv(
     hub_name = "pip_tools",
     venv_name = "default",
-        # Go/Gazelle does not let us inject cgo deps in a clean way.
-        # So we have to inject these deps into every c compilation.
-        # https://github.com/bazel-contrib/bazel-gazelle/issues/1543
-        # https://github.com/bazel-contrib/bazel-gazelle/issues/2261
-        # TODO:  add here libpam0g
-    ],
-    suites = [
-        "bookworm",
-        "bookworm-updates",
-        "bookworm-security",
-    ],
-)
 )
 uv.lockfile(
     src = "//jinja2:uv.lock",
@@ -122,17 +127,6 @@ uv.lockfile(
     venv_name = "pyang",
 )
 use_repo(uv, "pip_tools")
-use_repo(apt, "sysroot-bookworm")
-#use_repo(
-#    apt,
-#    "bookworm-security_linux-libc-dev-amd64_6.1.164-1",  # should modified every upgrade
-#    "bookworm_libc6-amd64_2.36-9-deb12u13",
-#    "bookworm_libc6-dev-amd64_2.36-9-deb12u13",
-#    "bookworm_libgcc-12-dev-amd64_12.2.0-14-deb12u1",
-#    "bookworm_libgcc-s1-amd64_12.2.0-14-deb12u1",
-#    "bookworm_libstdc---12-dev-amd64_12.2.0-14-deb12u1",
-#    "bookworm_libstdc--6-amd64_12.2.0-14-deb12u1",
-#)
 
 # rules_pkg removed: sonic_deb now uses ar/tar/objcopy directly from CC toolchain
 # TODO(bazel-ready): Add auto-formatting with buildifier

@@ -1,24 +1,8 @@
-# Copyright 2025 The Bazel Authors. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 load("@rules_cc//cc/toolchains:feature.bzl", "cc_feature")
-load("@rules_cc//cc/toolchains:make_variable.bzl", "cc_make_variable")
-load("@rules_cc//cc/toolchains:toolchain.bzl", "cc_toolchain")
+load(":defs.bzl", "sonic_gcc_toolchain")
 
 licenses(["notice"])
 
-# https://github.com/bazelbuild/rules_cc/commit/283d572e0e1f4fe864f1f94db2c2cd27cb1dcc6e
 cc_feature(
     name = "external_include_paths",
     args = ["@rules_cc//cc/toolchains/args/external_include_paths"],
@@ -26,51 +10,52 @@ cc_feature(
     visibility = ["//visibility:public"],
 )
 
+sonic_gcc_toolchain(
+    name = "linux_x86_64",
+    gcc_repo = "@gcc-linux-x86_64",
+    sysroot_repo = "@sysroot-bookworm//:directory",
+    target_arch = "amd64",
+)
+
+sonic_gcc_toolchain(
+    name = "cross_aarch64",
+    gcc_repo = "@gcc-linux-aarch64",
+    sysroot_repo = "@sysroot-bookworm//:directory",
+    target_arch = "arm64",
+)
+
+# --- Public handles to the pinned x86_64 GCC distribution ------------------
+# Repos created via use_repo_rule in this module's MODULE.bazel are only visible
+# from within @sonic_build_infra. These aliases re-export the GCC driver + the
+# full toolchain file set so other modules (e.g. @sonic-linux-kernel's
+# kernel_build action, which shells out to `make`) can depend on them.
 alias(
-    name = "host_gcc",
-    actual = ":gcc",
+    name = "x86_64_gcc_driver",
+    actual = "@gcc-linux-x86_64//:bin/x86_64-linux-gcc",
+    visibility = ["//visibility:public"],
 )
 
-cc_toolchain(
-    name = "gcc",
-    args = [
-        #        "//toolchains/gcc/args:nostdlib",
-        #        "//toolchains/gcc/args:nostdinc",
-        #        "//toolchains/gcc/args:nostdinc++",
-        #        "//toolchains/gcc/args:links",
-        #        "//toolchains/gcc/args:c_includes",  # C compilation with -isystem for libc
-        #        "//toolchains/gcc/args:cpp_includes",  # C++ compilation with -idirafter for #include_next
-        "//toolchains/args:no_absolute_paths_for_builtins",
-        "//toolchains/args:warnings",
-        "//toolchains/gcc/args:debian_includes",
-        "//toolchains/gcc/args:debian_links",
-        "//toolchains/gcc/args:linux_sysroot",
-    ],
-    compiler = "gcc",
-    enabled_features = [
-        #       ":external_include_paths",
-        "@rules_cc//cc/toolchains/args:experimental_replace_legacy_action_config_features",
-    ],
-    known_features = [
-        #       ":external_include_paths",
-        "@rules_cc//cc/toolchains/args:experimental_replace_legacy_action_config_features",
-    ],
-    tags = ["manual"],
-    tool_map = "//toolchains/gcc/tools:all_tools",
+# Complete distribution file set (driver wrapper + real binaries, cc1/cc1plus
+# under libexec, builtin headers, runtime libs, binutils). The kernel_build
+# action stages this so the wrapped gcc driver can find its sub-programs.
+alias(
+    name = "x86_64_gcc_files",
+    actual = "@gcc-linux-x86_64//:all_files",
+    visibility = ["//visibility:public"],
 )
 
-toolchain(
-    name = "host_gcc_toolchain",
-    exec_compatible_with = [
-        "@platforms//cpu:x86_64",
-        "@platforms//os:linux",
-    ],
-    target_compatible_with = [
-        "@platforms//cpu:x86_64",
-        "@platforms//os:linux",
-        "//platform:bookworm",
-    ],
-    toolchain = ":host_gcc",
-    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+# --- Public handles to the pinned aarch64 cross-GCC distribution -----------
+# Mirror of the x86_64 aliases above for the arm64 cross toolchain
+# (@gcc-linux-aarch64, prefix `aarch64-linux`). Consumed by
+# @sonic-linux-kernel's kernel_build action when cross-compiling arm64.
+alias(
+    name = "aarch64_gcc_driver",
+    actual = "@gcc-linux-aarch64//:bin/aarch64-linux-gcc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "aarch64_gcc_files",
+    actual = "@gcc-linux-aarch64//:all_files",
     visibility = ["//visibility:public"],
 )

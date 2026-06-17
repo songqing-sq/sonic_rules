@@ -1,19 +1,4 @@
-# Copyright 2025 The Bazel Authors. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 load("@bazel_skylib//rules/directory:directory.bzl", "directory")
-load("@bazel_skylib//rules/directory:subdirectory.bzl", "subdirectory")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -21,45 +6,74 @@ licenses(["notice"])
 
 exports_files(glob(["bin/**"]))
 
-# Directory-based rules in this toolchain only referece things in
-# lib/ or include/ subdirectories.
 directory(
     name = "toolchain_root",
-    srcs = glob([
-        "lib/**",
-        "include/**",
-    ]),
+    srcs = glob(["lib/**", "include/**", "*/include/**"], allow_empty = True),
 )
 
-# GCC builtin headers (stddef.h, stdarg.h, etc.)
 directory(
     name = "builtin_headers",
-    srcs = glob([
-        "include/**",
-        "lib/gcc/x86_64-linux/12.5.0/include/**",
-        "lib/gcc/x86_64-linux/12.5.0/include/**",
-        "lib/gcc/x86_64-linux/12.5.0/include-fixed/**"
-    ]),
+    srcs = glob(
+        [
+            "include/**",
+            "*/include/**",
+            "lib/gcc/*/12.5.0/include/**",
+            "lib/gcc/*/12.5.0/include-fixed/**",
+        ],
+        allow_empty = True,
+    ),
 )
 
-# Various supporting files needed to run the linker.
 filegroup(
     name = "linker_builtins",
-    data = glob([
-        "bin/*ld*",
-        "lib/**/*.a",
-        "lib/**/*.so*",
-        "lib/**/*.o",
-    ]),
+    data = glob(
+        [
+            "bin/*ld*",
+            # GCC's internal linker (collect2 resolves bare `ld` to
+            # <gcc>/<target>/bin/ld). The native cc rules reach it via the gcc
+            # driver's hard-coded search, but tools that invoke the driver
+            # outside Bazel's link action (e.g. autotools ./configure under
+            # rules_foreign_cc) need it explicitly staged, or collect2 fails
+            # with "cannot find 'ld'" when cross-compiling.
+            "*/bin/ld*",
+            "bin/*-as",
+            "bin/as",
+            "*/bin/as",
+            # GCC runtime libs (libgcc_s, libatomic, ...) live under various
+            # lib/lib64 dirs depending on the toolchain layout: top-level lib/
+            # and lib64/, and <target>/lib*/. Needed by tools that link via the
+            # bare driver (rules_foreign_cc autotools builds) where Bazel does
+            # not inject them through the link action.
+            "lib*/**/*.a",
+            "lib*/**/*.so*",
+            "lib*/**/*.o",
+            "*/lib*/**/*.a",
+            "*/lib*/**/*.so*",
+            "*/lib*/**/*.o",
+        ],
+        allow_empty = True,
+    ),
 )
 
-# Some toolchain distributions use busybox-style handling of tools, so things
-# like `g++` just redirect to a different binary. This glob catches this
-# binary if it's included in the distribution, and is a no-op if the multicall
-# binary doesn't exist.
 filegroup(
     name = "multicall_support_files",
-    srcs = glob([
-        "libexec/**/*",
-    ]),
+    srcs = glob(["libexec/**/*"]),
+)
+
+# Everything in the distribution (driver wrappers + real binaries, cc1/cc1plus,
+# all libs/headers/binutils). Used by the kernel_build action which invokes the
+# gcc driver outside Bazel's cc link action and therefore needs the full tree.
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        [
+            "bin/**",
+            "libexec/**",
+            "lib/**",
+            "lib64/**",
+            "include/**",
+            "*/**",
+        ],
+        allow_empty = True,
+    ),
 )
