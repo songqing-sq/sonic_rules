@@ -1,0 +1,6 @@
+# Exposes the GNU make 4.4.1 baked config.h (autoconf substitute, glibc/bookworm
+# x86_64) as a label so the @make_src http_archive in MODULE.bazel can reference
+# it via `patches`. config.h is captured from a reference `./configure` run; the
+# patch creates it at the make source root so the cc_binary compiles with -I.
+# (no host autotools at build time).
+exports_files(["config_h.patch"])

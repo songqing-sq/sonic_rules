@@ -370,3 +370,101 @@ cc_binary(
     urls = ["https://ftp.gnu.org/gnu/cpio/cpio-2.14.tar.gz"],
 )
 
+# ----------------------------------------------------------------------------
+# GNU make 4.4.1 — hermetic native Bazel host tool.
+#
+# The kernel build (and our config action) shell out to `make` against Kbuild.
+# Per the host-tools reference we source-compile make natively rather than
+# relying on a host `/usr/bin/make` or rules_foreign_cc's make_tool.
+#
+# make is autotools + a small gnulib subset. On glibc/bookworm x86_64 the
+# configure-resolved build is just:
+#   - src/<make_SRCS> + src/posixos.c + src/remote-stub.c   (the make program)
+#   - lib/concat-filename.c + lib/findprog-in.c             (the only gnulib
+#       objects that land in libgnu.a on glibc; glob/fnmatch/alloca/getloadavg
+#       are EXTRA_libgnu_a_SOURCES, conditionally compiled only when the system
+#       lacks them — glibc provides all four, so they are NOT compiled and the
+#       system <glob.h>/<fnmatch.h>/<alloca.h> are used directly).
+#
+# Per the autoconf reference we do NOT run ./configure. config.h is captured
+# from a reference configure run (glibc/bookworm) and re-created at the source
+# root by //make:config_h.patch, so the cc_binary finds it via -I. with no host
+# autotools at build time.
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "make_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+# Resolved CPPFLAGS from the upstream-generated Makefile (AM_CPPFLAGS):
+#   -DHAVE_CONFIG_H -Isrc -Ilib -DLIBDIR=... -DLOCALEDIR=... -DINCLUDEDIR=...
+MAKE_COPTS = [
+    "-DHAVE_CONFIG_H",
+    '-DLIBDIR=\\\\"/usr/local/lib\\\\"',
+    '-DLOCALEDIR=\\\\"/usr/local/share/locale\\\\"',
+    '-DINCLUDEDIR=\\\\"/usr/local/include\\\\"',
+    "-Wno-implicit-fallthrough",
+]
+
+cc_binary(
+    name = "make",
+    srcs = [
+        # make_SRCS (src/Makefile.am) — the POSIX/glibc build.
+        "src/ar.c",
+        "src/arscan.c",
+        "src/commands.c",
+        "src/default.c",
+        "src/dir.c",
+        "src/expand.c",
+        "src/file.c",
+        "src/function.c",
+        "src/getopt.c",
+        "src/getopt1.c",
+        "src/guile.c",
+        "src/hash.c",
+        "src/implicit.c",
+        "src/job.c",
+        "src/load.c",
+        "src/loadapi.c",
+        "src/main.c",
+        "src/misc.c",
+        "src/output.c",
+        "src/read.c",
+        "src/remake.c",
+        "src/rule.c",
+        "src/shuffle.c",
+        "src/signame.c",
+        "src/strcache.c",
+        "src/variable.c",
+        "src/version.c",
+        "src/vpath.c",
+        # non-WINDOWSENV + non-USE_CUSTOMS branches.
+        "src/posixos.c",
+        "src/remote-stub.c",
+        # gnulib objects that actually land in libgnu.a on glibc.
+        "lib/concat-filename.c",
+        "lib/findprog-in.c",
+    ] + glob([
+        "src/*.h",
+        "lib/*.h",
+        "config.h",
+    ]),
+    copts = MAKE_COPTS,
+    includes = [
+        ".",    # config.h
+        "src",
+        "lib",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    patch_args = ["-p1"],
+    patches = ["//make:config_h.patch"],
+    sha256 = "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3",
+    strip_prefix = "make-4.4.1",
+    urls = [
+        "https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz",
+        "https://mirrors.aliyun.com/gnu/make/make-4.4.1.tar.gz",
+    ],
+)
