@@ -15,6 +15,12 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "tar.bzl", version = "0.8.1")
+# @gawk: the sealed awk that //initramfs:defs.bzl and //tar:assert_tar.bzl take.
+# gawk is already in the module graph (pulled transitively by rules_distroless
+# and tar.bzl); this bazel_dep makes @gawk resolve to that module within this
+# module's repo namespace, so the bare @gawk label in those rules works (root-
+# module repos are not visible here). @gawk//:gawk is a prebuilt cc_binary.
+bazel_dep(name = "gawk", version = "5.3.2.bcr.3")
 
 # TODO(bazel-ready): Upgrade tar.bzl when the version with this commit releases.
 git_override(
