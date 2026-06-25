@@ -1,0 +1,36 @@
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# Hermetic mksquashfs/unsquashfs built from squashfs-tools 4.6.1 as native
+# Bazel cc_binary targets (defined in @squashfs_src; see sonic_rules/MODULE.bazel).
+# gzip (default) and zstd compressors are enabled; libz/libzstd come from the
+# in-tree @zlib_src//:z and @zstd_src//:zstd cc_library deps. No rules_foreign_cc.
+#
+# native_binary re-exports the @squashfs_src cc_binary outputs under stable
+# labels (//squashfs/tools:mksquashfs, :unsquashfs) so downstream rules
+# (squashfs/defs.bzl, disk_image, the tests) reference them unchanged.
+native_binary(
+    name = "mksquashfs",
+    src = "@squashfs_src//:mksquashfs",
+    out = "mksquashfs",
+)
+
+native_binary(
+    name = "unsquashfs",
+    src = "@squashfs_src//:unsquashfs",
+    out = "unsquashfs",
+)
+
+sh_test(
+    name = "mksquashfs_test",
+    srcs = ["mksquashfs_test.sh"],
+    args = [
+        "$(rootpath :mksquashfs)",
+        "$(rootpath :unsquashfs)",
+    ],
+    data = [
+        ":mksquashfs",
+        ":unsquashfs",
+    ],
+)

@@ -1,0 +1,38 @@
+load("//squashfs:defs.bzl", "mksquashfs")
+
+package(default_visibility = ["//visibility:private"])
+
+# Fixture rootfs tree: ./etc/os-release (kept) and ./boot/vmlinuz (excluded).
+genrule(
+    name = "fixture_tree",
+    outs = ["fixture_tree.tar"],
+    cmd = """
+set -e
+work=$$(mktemp -d)
+mkdir -p $$work/etc $$work/boot
+echo 'ID=sonic' > $$work/etc/os-release
+echo 'kernel' > $$work/boot/vmlinuz
+$(BSDTAR_BIN) --create --file $@ -C $$work .
+rm -rf $$work
+""",
+    toolchains = ["@tar.bzl//tar/toolchain:type"],
+)
+
+mksquashfs(
+    name = "fixture_squashfs",
+    tree = ":fixture_tree",
+    out = "fixture.squashfs",
+)
+
+sh_test(
+    name = "squashfs_test",
+    srcs = ["squashfs_test.sh"],
+    args = [
+        "$(rootpath :fixture_squashfs)",
+        "$(rootpath //squashfs/tools:unsquashfs)",
+    ],
+    data = [
+        ":fixture_squashfs",
+        "//squashfs/tools:unsquashfs",
+    ],
+)

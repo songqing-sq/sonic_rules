@@ -136,6 +136,194 @@ use_repo(uv, "pip_tools")
 
 # rules_pkg removed: sonic_deb now uses ar/tar/objcopy directly from CC toolchain
 # TODO(bazel-ready): Add auto-formatting with buildifier
+
+# ----------------------------------------------------------------------------
+# Hermetic mksquashfs/unsquashfs build tools (squashfs/tools).
+#
+# mksquashfs is not on the host PATH, so it is built from source as native
+# Bazel cc_binary targets (no rules_foreign_cc). squashfs-tools has no autoconf
+# — its plain Makefile is driven entirely by -D flags, so no config.h is needed;
+# the cc_binary copts below reproduce the Makefile's CFLAGS for GZIP_SUPPORT=1
+# ZSTD_SUPPORT=1 (XZ/LZO/LZ4 off). The legacy build invokes
+# `mksquashfs ... -comp zstd -b 1M`, so zstd (and the default gzip) compressors
+# must be linked in: libz is @zlib_src//:z and libzstd is @zstd_src//:zstd,
+# both already declared below as native cc_library deps.
+# ----------------------------------------------------------------------------
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_archive(
+    name = "squashfs_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+# CFLAGS reproduced from squashfs-tools/Makefile for the legacy SONiC build
+# options: GZIP_SUPPORT=1 ZSTD_SUPPORT=1 (XZ/LZO/LZ4/LZMA off), XATTR_SUPPORT=1
+# XATTR_DEFAULT=1 REPRODUCIBLE_DEFAULT=1, COMP_DEFAULT=gzip. VERSION/DATE/YEAR
+# come from RELEASE_VERSION/RELEASE_DATE in the Makefile (4.6.1, 2023/03/25).
+SQUASHFS_COPTS = [
+    "-D_FILE_OFFSET_BITS=64",
+    "-D_LARGEFILE_SOURCE",
+    "-D_GNU_SOURCE",
+    '-DCOMP_DEFAULT=\\\\"gzip\\\\"',
+    "-DGZIP_SUPPORT",
+    "-DZSTD_SUPPORT",
+    "-DXATTR_SUPPORT",
+    "-DXATTR_DEFAULT",
+    "-DREPRODUCIBLE_DEFAULT",
+    '-DVERSION=\\\\"4.6.1\\\\"',
+    '-DDATE=\\\\"2023/03/25\\\\"',
+    '-DYEAR=\\\\"2023\\\\"',
+    "-Wno-unused-result",
+]
+
+# All in-tree headers; the Makefile's per-object header deps mean every TU may
+# pull any of these via "-I.". Hand them to both binaries to keep srcs minimal.
+SQUASHFS_HDRS = glob(["*.h"])
+
+# MKSQUASHFS_OBJS (Makefile L209) + gzip_wrapper (L225) + zstd_wrapper (L275)
+# + xattr.o read_xattrs.o tar_xattr.o pseudo_xattr.o (L287).
+cc_binary(
+    name = "mksquashfs",
+    srcs = [
+        "mksquashfs.c",
+        "read_fs.c",
+        "action.c",
+        "swap.c",
+        "pseudo.c",
+        "compressor.c",
+        "sort.c",
+        "progressbar.c",
+        "info.c",
+        "restore.c",
+        "process_fragments.c",
+        "caches-queues-lists.c",
+        "reader.c",
+        "tar.c",
+        "date.c",
+        "gzip_wrapper.c",
+        "zstd_wrapper.c",
+        "xattr.c",
+        "read_xattrs.c",
+        "tar_xattr.c",
+        "pseudo_xattr.c",
+    ] + SQUASHFS_HDRS,
+    copts = SQUASHFS_COPTS,
+    includes = ["."],
+    linkopts = [
+        "-pthread",
+        "-lm",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "@zlib_src//:z",
+        "@zstd_src//:zstd",
+    ],
+)
+
+# UNSQUASHFS_OBJS (Makefile L213) + gzip_wrapper (L226) + zstd_wrapper (L276)
+# + read_xattrs.o unsquashfs_xattr.o (L288).
+cc_binary(
+    name = "unsquashfs",
+    srcs = [
+        "unsquashfs.c",
+        "unsquash-1.c",
+        "unsquash-2.c",
+        "unsquash-3.c",
+        "unsquash-4.c",
+        "unsquash-123.c",
+        "unsquash-34.c",
+        "unsquash-1234.c",
+        "unsquash-12.c",
+        "swap.c",
+        "compressor.c",
+        "unsquashfs_info.c",
+        "date.c",
+        "gzip_wrapper.c",
+        "zstd_wrapper.c",
+        "read_xattrs.c",
+        "unsquashfs_xattr.c",
+    ] + SQUASHFS_HDRS,
+    copts = SQUASHFS_COPTS,
+    includes = ["."],
+    linkopts = [
+        "-pthread",
+        "-lm",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "@zlib_src//:z",
+        "@zstd_src//:zstd",
+    ],
+)
+""",
+    sha256 = "9c4974e07c61547dae14af4ed1f358b7d04618ae194e54d6be72ee126f0d2f53",
+    # strip to the squashfs-tools/ subdir so the .c/.h sources are at the
+    # repo root (matching the "-I." include the Makefile uses).
+    strip_prefix = "squashfs-tools-4.6.1/squashfs-tools",
+    urls = ["https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"],
+)
+
+# zlib compiled as a plain cc_library producing libz.a (for mksquashfs -lz).
+http_archive(
+    name = "zlib_src",
+    build_file_content = """
+cc_library(
+    name = "z",
+    srcs = glob([
+        "*.c",
+        "*.h",
+    ]),
+    hdrs = [
+        "zconf.h",
+        "zlib.h",
+    ],
+    includes = ["."],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+    strip_prefix = "zlib-1.3.1",
+    urls = ["https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"],
+)
+
+# zstd compiled as a plain cc_library producing libzstd.a (for mksquashfs
+# -lzstd). Built single-threaded (no -DZSTD_MULTITHREAD) so the archive needs
+# no pthread symbols, keeping the squashfs static link order valid. The x86_64
+# assembly is dropped (-DZSTD_DISABLE_ASM) to keep the cc_library portable.
+http_archive(
+    name = "zstd_src",
+    build_file_content = """
+cc_library(
+    name = "zstd",
+    srcs = glob(
+        [
+            "lib/common/*.c",
+            "lib/common/*.h",
+            "lib/compress/*.c",
+            "lib/compress/*.h",
+            "lib/decompress/*.c",
+            "lib/decompress/*.h",
+        ],
+    ),
+    hdrs = [
+        "lib/zstd.h",
+        "lib/zstd_errors.h",
+    ],
+    copts = ["-DZSTD_DISABLE_ASM"],
+    includes = ["lib"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1",
+    strip_prefix = "zstd-1.5.6",
+    urls = ["https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz"],
+)
+
 # ----------------------------------------------------------------------------
 # GNU tar 1.35 — hermetic native Bazel build (replaces the host `tar`).
 #
