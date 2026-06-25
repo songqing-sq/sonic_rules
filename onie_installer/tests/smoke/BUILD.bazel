@@ -1,0 +1,38 @@
+# End-to-end smoke test for the sonic_onie_image composition macro.
+#
+# Lives in its own package because the macro's onie_installer instance produces
+# sonic-vs.bin (and the payload produces fs.zip), which would collide with the
+# fixture_bin / fixture_payload outputs in the parent tests/ package. The boot,
+# platform, sharch, conf and install.sh-template fixtures are reused from there.
+
+load("//onie_installer:image.bzl", "sonic_onie_image")
+
+package(default_visibility = ["//visibility:private"])
+
+sonic_onie_image(
+    name = "smoke_vs",
+    machine = "vs",
+    arch = "amd64",
+    platform = "x86_64-vs-r0",
+    image_version = "bazel-dev",
+    rootfs_layers = ["//rootfs:stub_rootfs"],
+    boot_files = "//onie_installer/tests:fixture_boot_files",
+    initrd = "//onie_installer/tests:fixture_initrd",
+    platform_tar = "//onie_installer/tests:fixture_platform",
+    sharch_body = "//onie_installer/tests:fixture_sharch",
+    install_sh_template = "//onie_installer/tests:fixture_install.sh",
+    onie_conf = "//onie_installer/tests:fixture_conf",
+    onie_conf_arch = "//onie_installer/tests:fixture_conf",
+    onie_image_part_size = "32768",
+    var_log_file_size = "4096",
+)
+
+# Reuse the parent package's self-extract sha1 verification script against the
+# composed sonic-vs.bin: asserts the payload checksum matches and that
+# installer/install.sh + installer/fs.zip are present.
+sh_test(
+    name = "smoke_test",
+    srcs = ["//onie_installer/tests:bin_test.sh"],
+    args = ["$(rootpath :smoke_vs)"],
+    data = [":smoke_vs"],
+)

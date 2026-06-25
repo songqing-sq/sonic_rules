@@ -1,0 +1,12 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "defs.bzl",
+    "image.bzl",
+])
+
+sh_binary(
+    name = "onie_mk",
+    srcs = ["onie_mk.sh"],
+    visibility = ["//visibility:public"],
+)

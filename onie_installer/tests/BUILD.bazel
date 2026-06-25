@@ -1,0 +1,149 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("//onie_installer:defs.bzl", "installer_install_sh", "installer_payload", "onie_installer")
+load("//squashfs:defs.bzl", "mksquashfs")
+
+package(default_visibility = ["//onie_installer/tests:__subpackages__"])
+
+# Source-file fixtures reused by the sonic_onie_image smoke test in the
+# tests/smoke sub-package (install.sh template + the .bin self-check script).
+exports_files([
+    "fixture_install.sh",
+    "bin_test.sh",
+])
+
+# Fixture boot files: a boot/-rooted tree (kernel) + the initrd file -- the same
+# shape production feeds the installer (boot_files tree + initrd file).
+genrule(
+    name = "fixture_vmlinuz",
+    outs = ["boot/vmlinuz-x"],
+    cmd = "echo 'kernel' > $@",
+)
+
+copy_to_directory(
+    name = "fixture_boot_files",
+    srcs = [":fixture_vmlinuz"],
+)
+
+genrule(
+    name = "fixture_initrd",
+    outs = ["boot/initrd.img-x"],
+    cmd = "echo 'initrd' > $@",
+)
+
+# Fixture platform.tar.gz: a gzip tar containing a firsttime file.
+genrule(
+    name = "fixture_platform",
+    outs = ["fixture_platform.tar.gz"],
+    cmd = """
+set -e
+work=$$(mktemp -d)
+echo 'firsttime' > $$work/firsttime
+$(BSDTAR_BIN) --create --gzip --file $@ -C $$work .
+rm -rf $$work
+""",
+    toolchains = ["@tar.bzl//tar/toolchain:type"],
+)
+
+# Fixture rootfs tree -> real squashfs via the sealed mksquashfs.
+genrule(
+    name = "fixture_tree",
+    outs = ["fixture_tree.tar"],
+    cmd = """
+set -e
+work=$$(mktemp -d)
+mkdir -p $$work/etc
+echo 'ID=sonic' > $$work/etc/os-release
+$(BSDTAR_BIN) --create --file $@ -C $$work .
+rm -rf $$work
+""",
+    toolchains = ["@tar.bzl//tar/toolchain:type"],
+)
+
+mksquashfs(
+    name = "fixture_squashfs",
+    tree = ":fixture_tree",
+    out = "fixture.squashfs",
+)
+
+installer_payload(
+    name = "fixture_payload",
+    squashfs = ":fixture_squashfs",
+    boot_files = ":fixture_boot_files",
+    initrd = ":fixture_initrd",
+    platform_tar = ":fixture_platform",
+    out = "fs.zip",
+)
+
+sh_test(
+    name = "payload_test",
+    srcs = ["payload_test.sh"],
+    args = ["$(rootpath :fixture_payload)"],
+    data = [":fixture_payload"],
+)
+
+# Self-contained fixture template exercising the %%...%% placeholders.
+installer_install_sh(
+    name = "fixture_subst",
+    arch = "amd64",
+    image_version = "bazel-dev",
+    part_size = "32768",
+    template = "fixture_install.sh",
+    var_log_file_size = "4096",
+)
+
+sh_test(
+    name = "subst_test",
+    srcs = ["subst_test.sh"],
+    args = ["$(rootpath :fixture_subst)"],
+    data = [":fixture_subst"],
+)
+
+# --- onie_installer (.bin) fixtures ---------------------------------------
+
+# sharch_body.sh template carrying the real sha1-check logic, so the produced
+# .bin can verify itself. Emitted verbatim, ending with the literal exit_marker.
+genrule(
+    name = "fixture_sharch",
+    outs = ["fixture_sharch.sh"],
+    cmd = """cat > $@ <<'EOF'
+#!/bin/sh
+payload_image_size=%%PAYLOAD_IMAGE_SIZE%%
+payload_sha1=%%IMAGE_SHA1%%
+sha1=$$(sed -e '1,/^exit_marker$$/d' "$$0" | head -c $$payload_image_size | sha1sum | awk '{print $$1}')
+[ "$$sha1" = "$$payload_sha1" ] || {{ echo "checksum FAIL"; exit 1; }}
+sed -e '1,/^exit_marker$$/d' "$$0" | head -c $$payload_image_size | tar xf -
+exit_marker
+EOF
+""",
+)
+
+genrule(
+    name = "fixture_conf",
+    outs = ["fixture_onie-image.conf"],
+    cmd = "echo 'OUTPUT_RAW_IMAGE=target/sonic.raw' > $@",
+)
+
+genrule(
+    name = "fixture_install_sh_bin",
+    outs = ["fixture_bin_install.sh"],
+    cmd = "printf '#!/bin/sh\\necho installing\\n' > $@",
+)
+
+onie_installer(
+    name = "fixture_bin",
+    conf = ":fixture_conf",
+    conf_arch = ":fixture_conf",
+    install_sh = ":fixture_install_sh_bin",
+    machine = "vs",
+    out = "sonic-vs.bin",
+    payload = ":fixture_payload",
+    platform = "x86_64-vs-r0",
+    sharch_body = ":fixture_sharch",
+)
+
+sh_test(
+    name = "bin_test",
+    srcs = ["bin_test.sh"],
+    args = ["$(rootpath :fixture_bin)"],
+    data = [":fixture_bin"],
+)
