@@ -23,9 +23,12 @@ def assert_tar(name, tar, expected, inconsistent_sizes = []):
 
         # This will transform the string to remove all extraneous spaces. However, it's much easier to
         # reason about than the alternatives, like `gensub`.
-        normalize_cmd = " | awk '{if (" + awk_condition + ') {$$5 = "???"} print}' + "'"
+        # Uses the sealed @gawk binary instead of system awk for hermetic builds.
+        normalize_cmd = " | $(execpath @gawk) '{if (" + awk_condition + ') {$$5 = "???"} print}' + "'"
+        gawk_tools = ["@gawk"]
     else:
         normalize_cmd = ""
+        gawk_tools = []
 
     native.genrule(
         name = listing,
@@ -34,6 +37,7 @@ def assert_tar(name, tar, expected, inconsistent_sizes = []):
         outs = ["{}.listing".format(name)],
         cmd = "$(BSDTAR_BIN) --verbose --list --file $(execpath {}){} | LC_ALL=C sort --key=9 >$@".format(tar, normalize_cmd),
         toolchains = ["@tar.bzl//tar/toolchain:type"],
+        tools = gawk_tools,
     )
 
     if inconsistent_sizes:
@@ -44,6 +48,7 @@ def assert_tar(name, tar, expected, inconsistent_sizes = []):
             testonly = True,
             outs = ["{}.expected_normalized".format(name)],
             cmd = "cat $(execpath {}){} >$@".format(expected, normalize_cmd),
+            tools = gawk_tools,
         )
         expected = normalized_expected
 

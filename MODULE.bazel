@@ -137,6 +137,65 @@ use_repo(uv, "pip_tools")
 # rules_pkg removed: sonic_deb now uses ar/tar/objcopy directly from CC toolchain
 # TODO(bazel-ready): Add auto-formatting with buildifier
 # ----------------------------------------------------------------------------
+# GNU tar 1.35 — hermetic native Bazel build (replaces the host `tar`).
+#
+# Three rootfs-assembly steps need GNU tar specifically (NOT the sealed bsdtar
+# from @tar.bzl): squashfs/rootfs extraction relies on `--keep-directory-symlink`
+# (debootstrap-style merged-/usr) and on `-p` preserving setuid on the build
+# user's own files (sudo/mount/su); onie_mk packs the installer/ dir with `-h`.
+# bsdtar drops setuid on non-root extraction and lacks --keep-directory-symlink,
+# so a from-source GNU tar is required.
+#
+# tar's lib/ is gnulib (portability shims). gnulib's headers (stdio.h, fcntl.h,
+# getopt.h, configmake.h, ...) and config.h are *generated* by ./configure from
+# @GNULIB_*@-substituted .in.h templates -- 41 headers + config.h, far too large
+# and sed-heavy to hand-write as heredocs. They are instead captured once (by
+# running ./configure against the same gcc-12.5.0 + @sysroot-bookworm toolchain
+# this build uses) and committed under //tar/gen. The 178 gnulib .c sources, 6
+# paxutils lib/ .c, and 24 tar src/ .c are compiled straight from this archive
+# against those committed generated headers (see //tar:BUILD.bazel). The 178
+# gnulib sources are listed explicitly: gnu/ ships 278 .c (alternate impls), of
+# which configure selects only 156 + 22 across malloc/unicase/unictype/uniwidth.
+#
+# acl/selinux are disabled (the bookworm sysroot carries no libacl/libselinux),
+# so the acl-*/se-* sources compile as no-op stubs and tar links libc only.
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "tar_src",
+    build_file_content = """
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# All upstream files are exported so //tar:tar_bin (in the main module) can pick
+# the exact .c subset configure selects; the generated headers + config.h come
+# from //tar:gen, kept out of this read-only archive.
+exports_files(glob(["**"]))
+
+# Header-only lib carrying the upstream include roots. `includes` must live on a
+# target *inside this repo* so the emitted -I paths resolve to
+# external/tar_src+/{gnu,lib,src} (the Makefile's -Ignu -Ilib + src self-include);
+# declaring them on a main-module cc_library would make -I main-package-relative
+# and miss the @tar_src headers. config.h and the generated gnulib headers are
+# supplied separately by //tar:gen_headers.
+cc_library(
+    name = "headers",
+    hdrs = glob(["gnu/**/*.h", "lib/*.h", "src/*.h"]),
+    # Several gnulib sources textually `#include "other.c"` (e.g. full-read.c
+    # includes full-write.c under -DFULL_READ to instantiate the read variant;
+    # strtol.c/inttostr.c/... do the same). Those .c are also compiled standalone
+    # (different macro -> different symbol, no duplicate). Exposing every .c as a
+    # textual_hdr puts them on the include path for the quote-include to resolve,
+    # without compiling them in this lib.
+    textual_hdrs = glob(["gnu/**/*.c", "lib/*.c", "src/*.c"]),
+    includes = ["gnu", "lib", "src"],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "14d55e32063ea9526e057fbf35fcabd53378e769787eff7919c3755b02d2b57e",
+    strip_prefix = "tar-1.35",
+    urls = ["https://ftp.gnu.org/gnu/tar/tar-1.35.tar.gz"],
+)
+
+# ----------------------------------------------------------------------------
 # elfutils 0.190 — libelf + libdw hermetic native Bazel host libraries.
 #
 # Needed by pahole (@dwarves_src//:pahole), the BTF generator the kernel build

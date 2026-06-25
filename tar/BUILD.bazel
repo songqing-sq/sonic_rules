@@ -1,0 +1,298 @@
+"""Hermetic GNU tar 1.35, built from @tar_src with native cc rules.
+
+Replaces the host `tar` in squashfs/rootfs extraction (needs
+--keep-directory-symlink + setuid-preserving -p) and onie_mk packing (-h).
+
+The cc_binary lives here (not in @tar_src's build_file_content) so it can depend
+on :gen_headers -- config.h plus 42 gnulib substitute headers (41 under gen/gnu,
+1 under gen/lib) that ./configure generates from .in.h templates. Those were
+captured once against this repo's gcc-12.5.0 + @sysroot-bookworm toolchain and
+committed under gen/; regenerating them is the only step that needs ./configure
+(never at build time).
+"""
+
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+# config.h + the 41 generated gnulib headers (gen/), exposed via three include
+# roots so the angle-bracket includes in the sources resolve:
+#   includes=["gen"]     -> <config.h>
+#   includes=["gen/gnu"] -> gnulib's <stdio.h>, <getopt.h>, <configmake.h>, <sys/stat.h>...
+#   includes=["gen/lib"] -> <rmt-command.h>
+# No upstream header shares a name with a generated one, so there is no shadowing
+# ambiguity (the one exception, stddef.h vs gcc's builtin, is handled in COPTS).
+cc_library(
+    name = "gen_headers",
+    hdrs = glob(["gen/**/*.h"]),  # includes gen/config.h
+    includes = ["gen", "gen/gnu", "gen/lib"],
+    visibility = ["//visibility:public"],
+)
+
+# COPTS: -DHAVE_CONFIG_H selects config.h; the warning suppressions keep gnulib's
+# portability code from failing the build under gcc-12 -Werror-free defaults.
+#
+# -Dunreachable: gcc-12 emits a call to the C23 `unreachable` library function at
+# the tail of _Noreturn functions whose body calls a non-noreturn callee (e.g.
+# error()), so gnulib's error.h does `(status)!=0 ? unreachable() : 0`. gnulib's
+# own gen/gnu/stddef.h #defines unreachable()->__builtin_unreachable() under
+# _GL_HAS_BUILTIN_UNREACHABLE, but that header cannot win over gcc's builtin
+# stddef.h: the toolchain emits its include dir as `-isystem` (defs.bzl:189) and
+# cc_library.includes also emit `-isystem` but later, so gcc's stddef.h (which
+# lacks unreachable) shadows gnulib's. Pre-defining the macro here yields the
+# exact expansion gnulib's stddef.h would (its `#ifndef unreachable` then no-ops)
+# -- not a bypass, the same __builtin_unreachable() code, just won early.
+TAR_COPTS = [
+    "-DHAVE_CONFIG_H",
+    "-Dunreachable()=__builtin_unreachable()",
+    "-Wno-implicit-fallthrough",
+    "-Wno-unused-parameter",
+    "-Wno-sign-compare",
+    "-Wno-missing-field-initializers",
+    "-Wno-unused-but-set-variable",
+    "-Wno-format-truncation",
+    "-Wno-stringop-truncation",
+    "-Wno-deprecated-declarations",
+]
+
+# tar binary. srcs = 24 tar src/, 6 paxutils lib/, and the 177 gnulib gnu/
+# sources ./configure selects (gnu/ ships 278 .c -- the rest are alternate impls
+# that must NOT be compiled or they duplicate symbols). The include roots come
+# from the deps: @tar_src//:headers carries -I{gnu,lib,src} (the Makefile's -I
+# flags, so upstream <gnu/...> and paxutils <...> headers resolve), :gen_headers
+# carries config.h + the generated gnulib headers.
+cc_binary(
+    name = "tar_bin",
+    srcs = [
+        # tar src/
+        "@tar_src//:src/buffer.c",
+        "@tar_src//:src/checkpoint.c",
+        "@tar_src//:src/compare.c",
+        "@tar_src//:src/create.c",
+        "@tar_src//:src/delete.c",
+        "@tar_src//:src/exclist.c",
+        "@tar_src//:src/exit.c",
+        "@tar_src//:src/extract.c",
+        "@tar_src//:src/incremen.c",
+        "@tar_src//:src/list.c",
+        "@tar_src//:src/map.c",
+        "@tar_src//:src/misc.c",
+        "@tar_src//:src/names.c",
+        "@tar_src//:src/sparse.c",
+        "@tar_src//:src/suffix.c",
+        "@tar_src//:src/system.c",
+        "@tar_src//:src/tar.c",
+        "@tar_src//:src/transform.c",
+        "@tar_src//:src/unlink.c",
+        "@tar_src//:src/update.c",
+        "@tar_src//:src/utf8.c",
+        "@tar_src//:src/warning.c",
+        "@tar_src//:src/xattrs.c",
+        "@tar_src//:src/xheader.c",
+        # paxutils lib/
+        "@tar_src//:lib/paxerror.c",
+        "@tar_src//:lib/paxexit-status.c",
+        "@tar_src//:lib/paxnames.c",
+        "@tar_src//:lib/rtapelib.c",
+        "@tar_src//:lib/wordsplit.c",
+        "@tar_src//:lib/xattr-at.c",
+        # gnulib gnu/ (explicit subset; see comment above)
+        "@tar_src//:gnu/acl-errno-valid.c",
+        "@tar_src//:gnu/acl-internal.c",
+        "@tar_src//:gnu/allocator.c",
+        "@tar_src//:gnu/areadlink-with-size.c",
+        "@tar_src//:gnu/areadlink.c",
+        "@tar_src//:gnu/areadlinkat-with-size.c",
+        "@tar_src//:gnu/areadlinkat.c",
+        "@tar_src//:gnu/argmatch.c",
+        "@tar_src//:gnu/argp-ba.c",
+        "@tar_src//:gnu/argp-eexst.c",
+        "@tar_src//:gnu/argp-fmtstream.c",
+        "@tar_src//:gnu/argp-fs-xinl.c",
+        "@tar_src//:gnu/argp-help.c",
+        "@tar_src//:gnu/argp-parse.c",
+        "@tar_src//:gnu/argp-pin.c",
+        "@tar_src//:gnu/argp-pv.c",
+        "@tar_src//:gnu/argp-pvh.c",
+        "@tar_src//:gnu/argp-version-etc.c",
+        "@tar_src//:gnu/argp-xinl.c",
+        "@tar_src//:gnu/asnprintf.c",
+        "@tar_src//:gnu/backup-find.c",
+        "@tar_src//:gnu/backupfile.c",
+        "@tar_src//:gnu/basename-lgpl.c",
+        "@tar_src//:gnu/basename.c",
+        "@tar_src//:gnu/bitrotate.c",
+        "@tar_src//:gnu/btowc.c",
+        "@tar_src//:gnu/c-ctype.c",
+        "@tar_src//:gnu/c-strcasecmp.c",
+        "@tar_src//:gnu/c-strncasecmp.c",
+        "@tar_src//:gnu/c32isalnum.c",
+        "@tar_src//:gnu/c32isalpha.c",
+        "@tar_src//:gnu/c32isblank.c",
+        "@tar_src//:gnu/c32iscntrl.c",
+        "@tar_src//:gnu/c32isdigit.c",
+        "@tar_src//:gnu/c32isgraph.c",
+        "@tar_src//:gnu/c32islower.c",
+        "@tar_src//:gnu/c32isprint.c",
+        "@tar_src//:gnu/c32ispunct.c",
+        "@tar_src//:gnu/c32isspace.c",
+        "@tar_src//:gnu/c32isupper.c",
+        "@tar_src//:gnu/c32isxdigit.c",
+        "@tar_src//:gnu/c32tolower.c",
+        "@tar_src//:gnu/c32width.c",
+        "@tar_src//:gnu/careadlinkat.c",
+        "@tar_src//:gnu/chdir-long.c",
+        "@tar_src//:gnu/cloexec.c",
+        "@tar_src//:gnu/close-stream.c",
+        "@tar_src//:gnu/closeout.c",
+        "@tar_src//:gnu/creat-safer.c",
+        "@tar_src//:gnu/dirname-lgpl.c",
+        "@tar_src//:gnu/dirname.c",
+        "@tar_src//:gnu/dup-safer-flag.c",
+        "@tar_src//:gnu/dup-safer.c",
+        "@tar_src//:gnu/exclude.c",
+        "@tar_src//:gnu/exitfail.c",
+        "@tar_src//:gnu/fchmodat.c",
+        "@tar_src//:gnu/fchownat.c",
+        "@tar_src//:gnu/fcntl.c",
+        "@tar_src//:gnu/fd-hook.c",
+        "@tar_src//:gnu/fd-safer-flag.c",
+        "@tar_src//:gnu/fd-safer.c",
+        "@tar_src//:gnu/fdutimensat.c",
+        "@tar_src//:gnu/file-has-acl.c",
+        "@tar_src//:gnu/filenamecat-lgpl.c",
+        "@tar_src//:gnu/fnmatch.c",
+        "@tar_src//:gnu/fopen.c",
+        "@tar_src//:gnu/fprintftime.c",
+        "@tar_src//:gnu/fseek.c",
+        "@tar_src//:gnu/fseeko.c",
+        "@tar_src//:gnu/full-read.c",
+        "@tar_src//:gnu/full-write.c",
+        "@tar_src//:gnu/futimens.c",
+        "@tar_src//:gnu/get-permissions.c",
+        "@tar_src//:gnu/getcwd-lgpl.c",
+        "@tar_src//:gnu/getcwd.c",
+        "@tar_src//:gnu/getopt.c",
+        "@tar_src//:gnu/getopt1.c",
+        "@tar_src//:gnu/getprogname.c",
+        "@tar_src//:gnu/gettime.c",
+        "@tar_src//:gnu/hard-locale.c",
+        "@tar_src//:gnu/hash.c",
+        "@tar_src//:gnu/human.c",
+        "@tar_src//:gnu/ialloc.c",
+        "@tar_src//:gnu/imaxtostr.c",
+        "@tar_src//:gnu/inttostr.c",
+        "@tar_src//:gnu/localcharset.c",
+        "@tar_src//:gnu/malloc/dynarray_at_failure.c",
+        "@tar_src//:gnu/malloc/dynarray_emplace_enlarge.c",
+        "@tar_src//:gnu/malloc/dynarray_finalize.c",
+        "@tar_src//:gnu/malloc/dynarray_resize.c",
+        "@tar_src//:gnu/malloc/dynarray_resize_clear.c",
+        "@tar_src//:gnu/malloc/scratch_buffer_grow.c",
+        "@tar_src//:gnu/malloc/scratch_buffer_grow_preserve.c",
+        "@tar_src//:gnu/malloc/scratch_buffer_set_array_size.c",
+        "@tar_src//:gnu/malloca.c",
+        "@tar_src//:gnu/mbchar.c",
+        "@tar_src//:gnu/mbrtoc32.c",
+        "@tar_src//:gnu/mbrtowc.c",
+        "@tar_src//:gnu/mbscasecmp.c",
+        "@tar_src//:gnu/mbsrtowcs-state.c",
+        "@tar_src//:gnu/mbsrtowcs.c",
+        "@tar_src//:gnu/mbuiter.c",
+        "@tar_src//:gnu/memchr.c",
+        "@tar_src//:gnu/mktime.c",
+        "@tar_src//:gnu/modechange.c",
+        "@tar_src//:gnu/nstrftime.c",
+        "@tar_src//:gnu/obstack.c",
+        "@tar_src//:gnu/offtostr.c",
+        "@tar_src//:gnu/open-safer.c",
+        "@tar_src//:gnu/openat-die.c",
+        "@tar_src//:gnu/openat-proc.c",
+        "@tar_src//:gnu/openat-safer.c",
+        "@tar_src//:gnu/opendir-safer.c",
+        "@tar_src//:gnu/opendirat.c",
+        "@tar_src//:gnu/parse-datetime.c",
+        "@tar_src//:gnu/pipe-safer.c",
+        "@tar_src//:gnu/printf-args.c",
+        "@tar_src//:gnu/printf-parse.c",
+        "@tar_src//:gnu/priv-set.c",
+        "@tar_src//:gnu/progname.c",
+        "@tar_src//:gnu/quotearg.c",
+        "@tar_src//:gnu/regex.c",
+        "@tar_src//:gnu/renameatu.c",
+        "@tar_src//:gnu/safe-read.c",
+        "@tar_src//:gnu/safe-write.c",
+        "@tar_src//:gnu/save-cwd.c",
+        "@tar_src//:gnu/savedir.c",
+        "@tar_src//:gnu/se-context.c",
+        "@tar_src//:gnu/se-label.c",
+        "@tar_src//:gnu/se-selinux.c",
+        "@tar_src//:gnu/selinux-at.c",
+        "@tar_src//:gnu/set-permissions.c",
+        "@tar_src//:gnu/setlocale_null.c",
+        "@tar_src//:gnu/stat-time.c",
+        "@tar_src//:gnu/stdopen.c",
+        "@tar_src//:gnu/stripslash.c",
+        "@tar_src//:gnu/strnlen1.c",
+        "@tar_src//:gnu/strtol.c",
+        "@tar_src//:gnu/strtoll.c",
+        "@tar_src//:gnu/strtoul.c",
+        "@tar_src//:gnu/strtoull.c",
+        "@tar_src//:gnu/tempname.c",
+        "@tar_src//:gnu/time_rz.c",
+        "@tar_src//:gnu/timegm.c",
+        "@tar_src//:gnu/timespec-sub.c",
+        "@tar_src//:gnu/timespec.c",
+        "@tar_src//:gnu/uinttostr.c",
+        "@tar_src//:gnu/umaxtostr.c",
+        "@tar_src//:gnu/unicase/tolower.c",
+        "@tar_src//:gnu/unictype/ctype_alnum.c",
+        "@tar_src//:gnu/unictype/ctype_alpha.c",
+        "@tar_src//:gnu/unictype/ctype_blank.c",
+        "@tar_src//:gnu/unictype/ctype_cntrl.c",
+        "@tar_src//:gnu/unictype/ctype_digit.c",
+        "@tar_src//:gnu/unictype/ctype_graph.c",
+        "@tar_src//:gnu/unictype/ctype_lower.c",
+        "@tar_src//:gnu/unictype/ctype_print.c",
+        "@tar_src//:gnu/unictype/ctype_punct.c",
+        "@tar_src//:gnu/unictype/ctype_space.c",
+        "@tar_src//:gnu/unictype/ctype_upper.c",
+        "@tar_src//:gnu/unictype/ctype_xdigit.c",
+        "@tar_src//:gnu/unistd.c",
+        "@tar_src//:gnu/uniwidth/width.c",
+        "@tar_src//:gnu/unlinkdir.c",
+        "@tar_src//:gnu/utimens.c",
+        "@tar_src//:gnu/vasnprintf.c",
+        "@tar_src//:gnu/version-etc-fsf.c",
+        "@tar_src//:gnu/version-etc.c",
+        "@tar_src//:gnu/wctype-h.c",
+        # gnu/xalloc-die.c is omitted on purpose: src/exit.c defines xalloc_die
+        # too. Upstream links gnulib as a static .a so src/exit.o's definition
+        # wins and the gnulib one is never pulled; a single cc_binary object set
+        # would instead get a duplicate-definition link error, so drop it here.
+        "@tar_src//:gnu/xasprintf.c",
+        "@tar_src//:gnu/xgetcwd.c",
+        "@tar_src//:gnu/xmalloc.c",
+        "@tar_src//:gnu/xsize.c",
+        "@tar_src//:gnu/xstrtol.c",
+        "@tar_src//:gnu/xstrtoul.c",
+        "@tar_src//:gnu/xstrtoumax.c",
+        "@tar_src//:gnu/xvasprintf.c",
+    ],
+    copts = TAR_COPTS,
+    visibility = ["//visibility:public"],
+    # @tar_src//:headers carries the upstream gnu/lib/src include roots;
+    # :gen_headers carries config.h + the generated gnulib headers.
+    deps = [":gen_headers", "@tar_src//:headers"],
+)
+
+# Stable alias, mirroring disk_image:{mke2fs,sgdisk}. Consumers (squashfs/rootfs
+# rules, onie_installer) reference //tar:tar rather than @tar_src internals.
+native_binary(
+    name = "tar",
+    src = ":tar_bin",
+    out = "tar",
+    visibility = ["//visibility:public"],
+)
