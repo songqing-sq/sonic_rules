@@ -1,0 +1,7 @@
+load("//rootfs:defs.bzl", "sonic_rootfs")
+
+sonic_rootfs(
+    name = "stub_rootfs",
+    layers = [],
+    visibility = ["//visibility:public"],
+)
