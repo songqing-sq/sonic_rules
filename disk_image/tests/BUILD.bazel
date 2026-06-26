@@ -1,0 +1,112 @@
+# Smoke test for //disk_image:sonic_disk_image — assembles a tiny GPT disk
+# image with the three expected partitions (BIOS-BOOT + ONIE-BOOT + SONiC-OS)
+# from a dummy SONiC-OS staging tar and the real ONIE recovery ISO, then
+# verifies the layout with sgdisk -p after gunzip.
+
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("//disk_image:disk_image.bzl", "sonic_disk_image")
+load("//disk_image:onie_iso_extract.bzl", "onie_iso_extract")
+
+package(default_visibility = ["//visibility:private"])
+
+# Real ONIE-BOOT staging tar from the downloaded
+# onie-recovery-x86_64-kvm_x86_64-r0.iso. Shared here so the same extractor
+# instance doubles as integration coverage of onie_iso_extract.
+onie_iso_extract(
+    name = "onie_real",
+    iso = "@onie_recovery_kvm_x86_64//file",
+)
+
+# onie_iso_extract publishes its tar via OutputGroupInfo("onie_boot"); split
+# it out so sonic_disk_image (which takes a single tar via onie_boot_staging)
+# and onie_boot_with_sonic_grub (which takes its base_onie_boot_tar attr) can
+# both consume it. declare_file() outputs are not directly label-addressable.
+filegroup(
+    name = "onie_real_onie_boot",
+    srcs = [":onie_real"],
+    output_group = "onie_boot",
+)
+
+# 256 MiB total = 1 (reserved) + 1 (BIOS) + 128 (ONIE) + 125 (SONiC) + 1
+# (GPT backup). Keeps the test fast (raw image is mostly zero, so the
+# pigz output is tiny). sonic_disk_image now assembles the SONiC-OS staging
+# tree inline from raw inputs (no pre-built staging tar), so feed it the stub
+# squashfs/boot/platform fixtures defined below.
+sonic_disk_image(
+    name = "small_test_image",
+    squashfs = ":stub_squashfs",
+    boot_files = ":stub_boot_files",
+    initrd = ":stub_initrd",
+    platform_tar = ":stub_platform_tar",
+    image_version = "test",
+    machine = "vs",
+    platform = "x86_64-vs-r0",
+    onie_boot_staging = ":onie_real_onie_boot",
+    disk_size_mb = 256,
+    out = "small_test.img.gz",
+)
+
+sh_test(
+    name = "small_image_test",
+    srcs = ["verify_image.sh"],
+    args = [
+        "$(rootpath :small_test_image)",
+        "$(rootpath //disk_image:sgdisk)",
+    ],
+    data = [
+        ":small_test_image",
+        "//disk_image:sgdisk",
+    ],
+    # sonic_disk_image action runs with no-sandbox/local to reach host
+    # grub-mkimage / grub-bios-setup; the test that consumes its output
+    # inherits no sandbox requirement (just gunzip + sgdisk -p).
+)
+
+# ----------------------------------------------------------------------------
+# Stub fixtures for small_test_image. The rule under test only operates on
+# archive/file structure, not actual SONiC fs contents, so dummies suffice.
+# ----------------------------------------------------------------------------
+
+# Stub squashfs: 1 KiB of zeros. sonic_os_staging just copies the file into
+# the staging tar; it does not parse the squashfs.
+genrule(
+    name = "stub_squashfs",
+    outs = ["fs.squashfs"],
+    cmd = "head -c 1024 /dev/zero > $@",
+)
+
+# Stub boot files: a boot/-rooted tree (kernel) + the initrd file -- the same
+# shape production feeds sonic_disk_image (boot_files tree + initrd file). The
+# rule under test only needs the files to exist at image-<ver>/boot/...; their
+# contents are never parsed.
+genrule(
+    name = "stub_vmlinuz",
+    outs = ["boot/vmlinuz-6.1.0-29-2-amd64"],
+    cmd = "echo dummy-vmlinuz > $@",
+)
+
+copy_to_directory(
+    name = "stub_boot_files",
+    srcs = [":stub_vmlinuz"],
+)
+
+genrule(
+    name = "stub_initrd",
+    outs = ["boot/initrd.img-6.1.0-29-2-amd64"],
+    cmd = "echo dummy-initrd > $@",
+)
+
+# Stub platform.tar.gz: one marker file. Same role as platform/vs:stub_platform.
+genrule(
+    name = "stub_platform_tar",
+    outs = ["platform.tar.gz"],
+    cmd = """
+set -e
+S=$$(mktemp -d)
+echo dummy-platform > $$S/firsttime
+$(BSDTAR_BIN) -czf $@ -C $$S .
+rm -rf $$S
+""",
+    toolchains = ["@tar.bzl//tar/toolchain:type"],
+)
+

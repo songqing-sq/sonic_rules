@@ -1,0 +1,89 @@
+"""Static disk-image (sonic-vs.img.gz) assembly rules.
+
+  * `onie_iso_extract` (T7) pulls MBR + GRUB i386-pc core.img + an
+    ONIE-BOOT partition staging tar out of a downloaded ONIE recovery ISO.
+  * `sonic_disk_image` (T8, defined in disk_image.bzl) consumes those plus
+    a SONiC-OS staging tar to assemble the raw partitioned GPT disk image
+    and gzip-compress it to sonic-<machine>.img.gz.
+
+Also exposes host-tool aliases (:mke2fs / :sgdisk / :pigz) so other
+packages (e.g. platform/vs) can depend on @sonic_build_infra//disk_image
+without naming the upstream http_archive repos directly, matching the
+@sonic_build_infra//squashfs/tools:mksquashfs pattern.
+"""
+
+load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
+load("@rules_python//python:defs.bzl", "py_binary")
+load(":onie_iso_extract.bzl", "onie_iso_extract")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["onie_iso_extract.bzl"])
+
+sh_binary(
+    name = "onie_iso_extract_sh",
+    srcs = ["onie_iso_extract.sh"],
+)
+
+sh_binary(
+    name = "sonic_disk_image_sh",
+    srcs = ["sonic_disk_image.sh"],
+)
+
+# Streams dockerfs.tar.gz (pigz-decompressed) re-rooted under image-<ver>/docker
+# into the one tar fed to `mke2fs -d -`, alongside the small boot/platform/
+# machine.conf staging tree. Avoids extracting the ~7 GiB store to disk.
+py_binary(
+    name = "tar_reprefix",
+    srcs = ["tar_reprefix.py"],
+)
+
+# Smoke target: extracts materials from the standard
+# onie-recovery-x86_64-kvm_x86_64-r0.iso. Used by both `bazel build` and
+# `bazel cquery --output=files` for verification (see CLAUDE.md).
+onie_iso_extract(
+    name = "onie_extract_test",
+    iso = "@onie_recovery_kvm_x86_64//file",
+)
+
+# Host-tool aliases. `native_binary` re-exports the upstream binary under a
+# stable label in this package, so callers can write
+# `@sonic_build_infra//disk_image:{mke2fs,sgdisk,pigz}` instead of reaching
+# into @e2fsprogs_src / @gdisk_src / @pigz_src directly. Mirrors the
+# squashfs/tools:mksquashfs pattern.
+
+native_binary(
+    name = "mke2fs",
+    src = "@e2fsprogs_src//:mke2fs",
+    out = "mke2fs",
+)
+
+native_binary(
+    name = "debugfs",
+    src = "@e2fsprogs_src//:debugfs",
+    out = "debugfs",
+)
+
+native_binary(
+    name = "sgdisk",
+    src = "@gdisk_src//:sgdisk",
+    out = "sgdisk",
+)
+
+native_binary(
+    name = "pigz",
+    src = "@pigz_src//:pigz",
+    out = "pigz",
+)
+
+native_binary(
+    name = "grub_mkimage",
+    src = "//grub:grub_mkimage",
+    out = "grub_mkimage",
+)
+
+native_binary(
+    name = "grub_bios_setup",
+    src = "//grub:grub_bios_setup",
+    out = "grub_bios_setup",
+)

@@ -1,0 +1,10 @@
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+# Smoke test for @popt_src//:popt — verifies libpopt.a links without
+# undefined symbols and exercises poptParseArgvString end-to-end. Kept as
+# a permanent regression check for future popt-version bumps.
+cc_test(
+    name = "popt_link_test",
+    srcs = ["popt_link_test.c"],
+    deps = ["@popt_src//:popt"],
+)

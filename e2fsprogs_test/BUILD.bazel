@@ -1,0 +1,9 @@
+# Smoke test for @e2fsprogs_src//:mke2fs — verifies the binary runs, creates
+# a valid ext4 superblock, and accepts the -E offset/-d options consumed by
+# the sonic-vs.img.gz static assembly pipeline.
+sh_test(
+    name = "mke2fs_test",
+    srcs = ["mke2fs_test.sh"],
+    args = ["$(rootpath @e2fsprogs_src//:mke2fs)"],
+    data = ["@e2fsprogs_src//:mke2fs"],
+)

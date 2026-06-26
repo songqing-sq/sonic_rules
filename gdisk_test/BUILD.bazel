@@ -1,0 +1,9 @@
+# Smoke test for @gdisk_src//:sgdisk — verifies the binary runs, writes
+# a fresh GPT, and round-trips a partition label. Kept as a permanent
+# regression check for the sonic-vs.img.gz static assembly pipeline.
+sh_test(
+    name = "sgdisk_test",
+    srcs = ["sgdisk_test.sh"],
+    args = ["$(rootpath @gdisk_src//:sgdisk)"],
+    data = ["@gdisk_src//:sgdisk"],
+)
