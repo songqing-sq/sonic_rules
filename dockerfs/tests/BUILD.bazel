@@ -1,0 +1,11 @@
+# The structural test scripts live here (reusable, committed to the sonic_rules
+# submodule). The fixture_store + sh_test wiring lives in the ROOT module
+# (//dockerfs/tests) because the real `//dockers/docker-database` oci_image
+# belongs to the root module and a dependency module cannot reference it
+# (that would be a module dependency cycle).
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "store_test.sh",
+    "dockerd_load_test.sh",
+])

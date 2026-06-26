@@ -1,0 +1,13 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "defs.bzl",
+    "build_store.sh",
+])
+
+py_binary(
+    name = "overlay2_build",
+    srcs = ["overlay2_build.py"],
+)
