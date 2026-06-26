@@ -1,0 +1,687 @@
+"""GRUB 2.06 host tools and i386-pc platform images.
+
+Host tools (grub-mkimage, grub-bios-setup) are built from source as
+cc_binary targets. The i386-pc platform images (boot.img, kernel.img,
+diskboot.img, lzma_decompress.img) are built from @grub_src assembly/C
+source via a genrule that invokes build_platform_imgs.sh with gcc -m32.
+
+Source .c files come from @grub_src (http_archive). Pre-generated files
+(config.h, config-util.h, bison/flex output, gnulib headers,
+libgrub_a_init.c, symlist.c) are checked into //grub/generated/ -- they
+are fixed for GRUB 2.06 on x86_64 Linux (glibc/bookworm).
+
+The libraries are split into multiple cc_library targets to avoid Bazel
+object-file basename collisions (e.g. multiple misc.c, getroot.c,
+hostdisk.c from different GRUB subdirectories).
+"""
+
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Expose the grub-bios-setup mountinfo patch as a label so the @grub_src
+# http_archive in MODULE.bazel can reference it via `patches`. The patch
+# makes grub-bios-setup fall back to the destination disk image as the root
+# device when its --directory has no real backing block device (overlayfs /
+# tmpfs in the Bazel sandbox), instead of aborting on /proc/self/mountinfo.
+exports_files(["grub-bios-setup-no-mountinfo.patch"])
+
+# ---------------------------------------------------------------------------
+# Generated headers
+# ---------------------------------------------------------------------------
+# Config + parser headers (safe to use globally; no system-header shadowing).
+cc_library(
+    name = "generated_hdrs",
+    hdrs = [
+        "generated/config.h",
+        "generated/config-util.h",
+        "generated/grub_script.tab.h",
+        "generated/grub_script.yy.h",
+    ],
+    includes = ["generated"],
+)
+
+# Gnulib generated headers (override system <stdio.h>, <unistd.h>, etc.
+# via #include_next). Only the :gnulib cc_library should depend on this;
+# propagating these -isystem paths to other targets causes #include_next
+# collisions with posix_wrap or other header-shadowing schemes.
+cc_library(
+    name = "gnulib_gen_hdrs",
+    hdrs = glob(["generated/gnulib/**/*.h"]),
+    includes = ["generated/gnulib"],
+)
+
+# ---------------------------------------------------------------------------
+# Common compilation flags (from make -n output)
+# ---------------------------------------------------------------------------
+COMMON_COPTS = [
+    "-DHAVE_CONFIG_H",
+    "-DGRUB_UTIL=1",
+    '-DGRUB_FILE=\'"grub"\'',
+    "-D_FILE_OFFSET_BITS=64",
+    "-std=gnu99",
+    "-fno-builtin-gettext",
+    "-Wno-error",
+    "-Wno-unused-parameter",
+    "-Wno-sign-compare",
+    "-Wno-implicit-fallthrough",
+    "-Wno-unused-result",
+    "-Wno-unused-but-set-variable",
+    "-Wno-missing-field-initializers",
+    "-Wno-deprecated-declarations",
+    "-Wno-undef",
+    "-Wno-redundant-decls",
+    "-Wno-old-style-definition",
+    "-Wno-type-limits",
+    "-Wno-format",
+    "-Wno-missing-prototypes",
+    "-Wno-missing-declarations",
+    "-Wno-cast-align",
+    "-Wno-nested-externs",
+    "-Wno-shadow",
+    "-Wno-address",
+    "-Wno-strict-aliasing",
+]
+
+COMMON_DEPS = [
+    ":generated_hdrs",
+    "@grub_src//:grub_hdrs",
+    "@grub_src//:gnulib_src_hdrs",
+    "@grub_src//:textual_includes",
+]
+
+# ---------------------------------------------------------------------------
+# gnulib (50 .c files)
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "gnulib",
+    srcs = [
+        "@grub_src//:grub-core/lib/gnulib/argp-ba.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-eexst.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-fmtstream.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-fs-xinl.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-help.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-parse.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-pin.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-pv.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-pvh.c",
+        "@grub_src//:grub-core/lib/gnulib/argp-xinl.c",
+        "@grub_src//:grub-core/lib/gnulib/asnprintf.c",
+        "@grub_src//:grub-core/lib/gnulib/base64.c",
+        "@grub_src//:grub-core/lib/gnulib/basename-lgpl.c",
+        "@grub_src//:grub-core/lib/gnulib/chdir-long.c",
+        "@grub_src//:grub-core/lib/gnulib/cloexec.c",
+        "@grub_src//:grub-core/lib/gnulib/dirname-lgpl.c",
+        "@grub_src//:grub-core/lib/gnulib/dup-safer-flag.c",
+        "@grub_src//:grub-core/lib/gnulib/dup-safer.c",
+        "@grub_src//:grub-core/lib/gnulib/exitfail.c",
+        "@grub_src//:grub-core/lib/gnulib/fcntl.c",
+        "@grub_src//:grub-core/lib/gnulib/fd-hook.c",
+        "@grub_src//:grub-core/lib/gnulib/fd-safer-flag.c",
+        "@grub_src//:grub-core/lib/gnulib/fd-safer.c",
+        "@grub_src//:grub-core/lib/gnulib/filenamecat-lgpl.c",
+        "@grub_src//:grub-core/lib/gnulib/getopt.c",
+        "@grub_src//:grub-core/lib/gnulib/getopt1.c",
+        "@grub_src//:grub-core/lib/gnulib/getprogname.c",
+        "@grub_src//:grub-core/lib/gnulib/hard-locale.c",
+        "@grub_src//:grub-core/lib/gnulib/localcharset.c",
+        "@grub_src//:grub-core/lib/gnulib/glthread/lock.c",
+        "@grub_src//:grub-core/lib/gnulib/malloca.c",
+        "@grub_src//:grub-core/lib/gnulib/mbrtowc.c",
+        "@grub_src//:grub-core/lib/gnulib/mbswidth.c",
+        "@grub_src//:grub-core/lib/gnulib/openat-die.c",
+        "@grub_src//:grub-core/lib/gnulib/openat-proc.c",
+        "@grub_src//:grub-core/lib/gnulib/pipe-safer.c",
+        "@grub_src//:grub-core/lib/gnulib/printf-args.c",
+        "@grub_src//:grub-core/lib/gnulib/printf-parse.c",
+        "@grub_src//:grub-core/lib/gnulib/progname.c",
+        "@grub_src//:grub-core/lib/gnulib/regex.c",
+        "@grub_src//:grub-core/lib/gnulib/save-cwd.c",
+        "@grub_src//:grub-core/lib/gnulib/stat-time.c",
+        "@grub_src//:grub-core/lib/gnulib/stripslash.c",
+        "@grub_src//:grub-core/lib/gnulib/strnlen1.c",
+        "@grub_src//:grub-core/lib/gnulib/glthread/threadlib.c",
+        "@grub_src//:grub-core/lib/gnulib/unistd.c",
+        "@grub_src//:grub-core/lib/gnulib/vasnprintf.c",
+        "@grub_src//:grub-core/lib/gnulib/wctype-h.c",
+        "@grub_src//:grub-core/lib/gnulib/uniwidth/width.c",
+        "@grub_src//:grub-core/lib/gnulib/xsize.c",
+    ],
+    copts = COMMON_COPTS,
+    linkstatic = True,
+    deps = COMMON_DEPS + [":gnulib_gen_hdrs"],
+)
+
+# ---------------------------------------------------------------------------
+# libgcrypt cipher library (22 .c files)
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "grubgcry",
+    srcs = [
+        # Cipher wrapper headers (shadow src/ originals; must be
+        # in srcs so they're in the sandbox alongside the .c files
+        # for same-directory quote includes to work)
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/bithelp.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/bufhelp.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/camellia.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/cipher.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/g10lib.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/hash-common.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/memory.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/rijndael-tables.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/rmd.h",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/types.h",
+        # Cipher source files
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/arcfour.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/blowfish.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/camellia-glue.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/camellia.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/cast5.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/crc.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/des.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/idea.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/init.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/md4.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/md5.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/rfc2268.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/rijndael.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/rmd160.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/seed.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/serpent.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/sha1.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/sha256.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/sha512.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/tiger.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/twofish.c",
+        "@grub_src//:grub-core/lib/libgcrypt-grub/cipher/whirlpool.c",
+    ],
+    copts = COMMON_COPTS + ["-D_GCRYPT_IN_LIBGCRYPT"],
+    linkstatic = True,
+    implementation_deps = [
+        "@grub_src//:posix_wrap_hdrs",
+        "@grub_src//:gcrypt_cipher_hdrs",
+        "@grub_src//:gcrypt_hdrs",
+    ],
+    deps = COMMON_DEPS + [
+        "@grub_src//:extra_hdrs",
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# libgrubmods — GRUB module code (~110 .c + 3 generated)
+#
+# Split: grubmods (main), grubmods_gfxfont (gfxmenu/font.c collides
+# with font/font.c), grubmods_dl_arm/dl_arm64 (dl_helper.c basename
+# collision with ia64/dl_helper.c which stays in the main target).
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "grubmods_gfxfont",
+    srcs = ["@grub_src//:grub-core/gfxmenu/font.c"],
+    copts = COMMON_COPTS + ["-DMINILZO_HAVE_CONFIG_H", "-fno-builtin"],
+    linkstatic = True,
+    deps = COMMON_DEPS + ["@grub_src//:extra_hdrs"],
+)
+
+cc_library(
+    name = "grubmods_dl_arm",
+    srcs = ["@grub_src//:grub-core/kern/arm/dl_helper.c"],
+    copts = COMMON_COPTS + ["-fno-builtin"],
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+cc_library(
+    name = "grubmods_dl_arm64",
+    srcs = ["@grub_src//:grub-core/kern/arm64/dl_helper.c"],
+    copts = COMMON_COPTS + ["-fno-builtin"],
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+cc_library(
+    name = "grubmods",
+    srcs = [
+        # Generated sources (bison/flex output + geninit)
+        "generated/grub_script.tab.c",
+        "generated/grub_script.yy.c",
+        "generated/libgrub_a_init.c",
+        # grub-core/commands/
+        "@grub_src//:grub-core/commands/blocklist.c",
+        "@grub_src//:grub-core/commands/macbless.c",
+        "@grub_src//:grub-core/commands/xnu_uuid.c",
+        "@grub_src//:grub-core/commands/testload.c",
+        "@grub_src//:grub-core/commands/ls.c",
+        # grub-core/disk/
+        "@grub_src//:grub-core/disk/dmraid_nvidia.c",
+        "@grub_src//:grub-core/disk/loopback.c",
+        "@grub_src//:grub-core/disk/lvm.c",
+        "@grub_src//:grub-core/disk/mdraid_linux.c",
+        "@grub_src//:grub-core/disk/mdraid_linux_be.c",
+        "@grub_src//:grub-core/disk/mdraid1x_linux.c",
+        "@grub_src//:grub-core/disk/raid5_recover.c",
+        "@grub_src//:grub-core/disk/raid6_recover.c",
+        # grub-core/font/
+        "@grub_src//:grub-core/font/font.c",
+        # grub-core/normal/
+        "@grub_src//:grub-core/normal/charset.c",
+        "@grub_src//:grub-core/normal/misc.c",
+        # grub-core/video/
+        "@grub_src//:grub-core/video/fb/fbblit.c",
+        "@grub_src//:grub-core/video/fb/fbutil.c",
+        "@grub_src//:grub-core/video/fb/fbfill.c",
+        "@grub_src//:grub-core/video/fb/video_fb.c",
+        "@grub_src//:grub-core/video/video.c",
+        "@grub_src//:grub-core/video/capture.c",
+        "@grub_src//:grub-core/video/colors.c",
+        # grub-core/ top-level
+        "@grub_src//:grub-core/unidata.c",
+        # grub-core/io/
+        "@grub_src//:grub-core/io/bufio.c",
+        "@grub_src//:grub-core/io/gzio.c",
+        "@grub_src//:grub-core/io/xzio.c",
+        "@grub_src//:grub-core/io/lzopio.c",
+        # grub-core/fs/
+        "@grub_src//:grub-core/fs/affs.c",
+        "@grub_src//:grub-core/fs/afs.c",
+        "@grub_src//:grub-core/fs/bfs.c",
+        "@grub_src//:grub-core/fs/btrfs.c",
+        "@grub_src//:grub-core/fs/cbfs.c",
+        "@grub_src//:grub-core/fs/cpio.c",
+        "@grub_src//:grub-core/fs/cpio_be.c",
+        "@grub_src//:grub-core/fs/odc.c",
+        "@grub_src//:grub-core/fs/newc.c",
+        "@grub_src//:grub-core/fs/ext2.c",
+        "@grub_src//:grub-core/fs/fat.c",
+        "@grub_src//:grub-core/fs/exfat.c",
+        "@grub_src//:grub-core/fs/f2fs.c",
+        "@grub_src//:grub-core/fs/fshelp.c",
+        "@grub_src//:grub-core/fs/hfs.c",
+        "@grub_src//:grub-core/fs/hfsplus.c",
+        "@grub_src//:grub-core/fs/hfspluscomp.c",
+        "@grub_src//:grub-core/fs/iso9660.c",
+        "@grub_src//:grub-core/fs/jfs.c",
+        "@grub_src//:grub-core/fs/minix.c",
+        "@grub_src//:grub-core/fs/minix2.c",
+        "@grub_src//:grub-core/fs/minix2_be.c",
+        "@grub_src//:grub-core/fs/minix3.c",
+        "@grub_src//:grub-core/fs/minix3_be.c",
+        "@grub_src//:grub-core/fs/minix_be.c",
+        "@grub_src//:grub-core/fs/nilfs2.c",
+        "@grub_src//:grub-core/fs/ntfs.c",
+        "@grub_src//:grub-core/fs/ntfscomp.c",
+        "@grub_src//:grub-core/fs/reiserfs.c",
+        "@grub_src//:grub-core/fs/romfs.c",
+        "@grub_src//:grub-core/fs/sfs.c",
+        "@grub_src//:grub-core/fs/squash4.c",
+        "@grub_src//:grub-core/fs/tar.c",
+        "@grub_src//:grub-core/fs/udf.c",
+        "@grub_src//:grub-core/fs/ufs.c",
+        "@grub_src//:grub-core/fs/ufs2.c",
+        "@grub_src//:grub-core/fs/ufs_be.c",
+        "@grub_src//:grub-core/fs/xfs.c",
+        # grub-core/fs/zfs/
+        "@grub_src//:grub-core/fs/zfs/zfscrypt.c",
+        "@grub_src//:grub-core/fs/zfs/zfs.c",
+        "@grub_src//:grub-core/fs/zfs/zfsinfo.c",
+        "@grub_src//:grub-core/fs/zfs/zfs_lzjb.c",
+        "@grub_src//:grub-core/fs/zfs/zfs_lz4.c",
+        "@grub_src//:grub-core/fs/zfs/zfs_sha256.c",
+        "@grub_src//:grub-core/fs/zfs/zfs_fletcher.c",
+        # grub-core/lib/
+        "@grub_src//:grub-core/lib/envblk.c",
+        "@grub_src//:grub-core/lib/hexdump.c",
+        "@grub_src//:grub-core/lib/LzFind.c",
+        "@grub_src//:grub-core/lib/LzmaEnc.c",
+        "@grub_src//:grub-core/lib/crc.c",
+        "@grub_src//:grub-core/lib/adler32.c",
+        "@grub_src//:grub-core/lib/crc64.c",
+        "@grub_src//:grub-core/lib/datetime.c",
+        # grub-core/partmap/
+        "@grub_src//:grub-core/partmap/acorn.c",
+        "@grub_src//:grub-core/partmap/amiga.c",
+        "@grub_src//:grub-core/partmap/apple.c",
+        "@grub_src//:grub-core/partmap/sun.c",
+        "@grub_src//:grub-core/partmap/plan.c",
+        "@grub_src//:grub-core/partmap/dvh.c",
+        "@grub_src//:grub-core/partmap/sunpc.c",
+        "@grub_src//:grub-core/partmap/bsdlabel.c",
+        "@grub_src//:grub-core/partmap/dfly.c",
+        # grub-core/script/
+        "@grub_src//:grub-core/script/function.c",
+        "@grub_src//:grub-core/script/execute.c",
+        "@grub_src//:grub-core/script/lexer.c",
+        "@grub_src//:grub-core/script/main.c",
+        "@grub_src//:grub-core/script/script.c",
+        "@grub_src//:grub-core/script/argv.c",
+        # grub-core/kern/ (dl_helper for ia64 stays here; arm/arm64 split out)
+        "@grub_src//:grub-core/kern/ia64/dl_helper.c",
+        # grub-core/lib/minilzo/
+        "@grub_src//:grub-core/lib/minilzo/minilzo.c",
+        # grub-core/lib/xzembed/
+        "@grub_src//:grub-core/lib/xzembed/xz_dec_bcj.c",
+        "@grub_src//:grub-core/lib/xzembed/xz_dec_lzma2.c",
+        "@grub_src//:grub-core/lib/xzembed/xz_dec_stream.c",
+        # grub-core/lib/zstd/
+        "@grub_src//:grub-core/lib/zstd/debug.c",
+        "@grub_src//:grub-core/lib/zstd/entropy_common.c",
+        "@grub_src//:grub-core/lib/zstd/error_private.c",
+        "@grub_src//:grub-core/lib/zstd/fse_decompress.c",
+        "@grub_src//:grub-core/lib/zstd/huf_decompress.c",
+        "@grub_src//:grub-core/lib/zstd/module.c",
+        "@grub_src//:grub-core/lib/zstd/xxhash.c",
+        "@grub_src//:grub-core/lib/zstd/zstd_common.c",
+        "@grub_src//:grub-core/lib/zstd/zstd_decompress.c",
+    ],
+    copts = COMMON_COPTS + [
+        "-DMINILZO_HAVE_CONFIG_H",
+        "-fno-builtin",
+    ],
+    linkstatic = True,
+    deps = COMMON_DEPS + [
+        ":grubmods_dl_arm",
+        ":grubmods_dl_arm64",
+        ":grubmods_gfxfont",
+        "@grub_src//:extra_hdrs",
+    ],
+)
+
+# ---------------------------------------------------------------------------
+# libgrubkern — GRUB kernel / util / osdep code (~42 .c files)
+#
+# Split into sub-targets to handle basename collisions:
+#   misc.c (3 copies), getroot.c (4), hostdisk.c (4), disk.c (2).
+# argp_common.c is excluded (each binary provides its own).
+# ---------------------------------------------------------------------------
+
+# util/ files: misc.c, getroot.c
+cc_library(
+    name = "grubkern_util",
+    srcs = [
+        "@grub_src//:util/misc.c",
+        "@grub_src//:util/getroot.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/kern/ files (command, device, disk, env, err, file, fs,
+# list, misc, partition)
+cc_library(
+    name = "grubkern_kern",
+    srcs = [
+        "@grub_src//:grub-core/kern/command.c",
+        "@grub_src//:grub-core/kern/device.c",
+        "@grub_src//:grub-core/kern/disk.c",
+        "@grub_src//:grub-core/kern/env.c",
+        "@grub_src//:grub-core/kern/err.c",
+        "@grub_src//:grub-core/kern/file.c",
+        "@grub_src//:grub-core/kern/fs.c",
+        "@grub_src//:grub-core/kern/list.c",
+        "@grub_src//:grub-core/kern/misc.c",
+        "@grub_src//:grub-core/kern/partition.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/kern/emu/ files (hostdisk, misc, mm) — NO argp_common
+cc_library(
+    name = "grubkern_emu",
+    srcs = [
+        "@grub_src//:grub-core/kern/emu/hostdisk.c",
+        "@grub_src//:grub-core/kern/emu/misc.c",
+        "@grub_src//:grub-core/kern/emu/mm.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/lib/ files (disk, crypto, pbkdf2, arg, json)
+cc_library(
+    name = "grubkern_lib",
+    srcs = [
+        "@grub_src//:grub-core/lib/disk.c",
+        "@grub_src//:grub-core/lib/crypto.c",
+        "@grub_src//:grub-core/lib/pbkdf2.c",
+        "@grub_src//:grub-core/lib/arg.c",
+        "@grub_src//:grub-core/lib/json/json.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS + ["@grub_src//:extra_hdrs"],
+)
+
+# grub-core/osdep/ top-level files
+cc_library(
+    name = "grubkern_osdep",
+    srcs = [
+        "@grub_src//:grub-core/osdep/getroot.c",
+        "@grub_src//:grub-core/osdep/hostdisk.c",
+        "@grub_src//:grub-core/osdep/relpath.c",
+        "@grub_src//:grub-core/osdep/exec.c",
+        "@grub_src//:grub-core/osdep/sleep.c",
+        "@grub_src//:grub-core/osdep/password.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/osdep/unix/ files
+cc_library(
+    name = "grubkern_osdep_unix",
+    srcs = [
+        "@grub_src//:grub-core/osdep/unix/getroot.c",
+        "@grub_src//:grub-core/osdep/unix/hostdisk.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/osdep/devmapper/ files
+cc_library(
+    name = "grubkern_osdep_dm",
+    srcs = [
+        "@grub_src//:grub-core/osdep/devmapper/getroot.c",
+        "@grub_src//:grub-core/osdep/devmapper/hostdisk.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/disk/ crypto/filter files
+cc_library(
+    name = "grubkern_disk",
+    srcs = [
+        "@grub_src//:grub-core/disk/luks.c",
+        "@grub_src//:grub-core/disk/luks2.c",
+        "@grub_src//:grub-core/disk/geli.c",
+        "@grub_src//:grub-core/disk/cryptodisk.c",
+        "@grub_src//:grub-core/disk/AFSplitter.c",
+        "@grub_src//:grub-core/disk/ldm.c",
+        "@grub_src//:grub-core/disk/diskfilter.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS + ["@grub_src//:extra_hdrs"],
+)
+
+# grub-core/commands/extcmd.c
+cc_library(
+    name = "grubkern_extcmd",
+    srcs = ["@grub_src//:grub-core/commands/extcmd.c"],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/partmap/ (gpt, msdos)
+cc_library(
+    name = "grubkern_partmap",
+    srcs = [
+        "@grub_src//:grub-core/partmap/gpt.c",
+        "@grub_src//:grub-core/partmap/msdos.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# grub-core/fs/ (proc, archelp)
+cc_library(
+    name = "grubkern_fs",
+    srcs = [
+        "@grub_src//:grub-core/fs/proc.c",
+        "@grub_src//:grub-core/fs/archelp.c",
+    ],
+    copts = COMMON_COPTS,
+    alwayslink = True,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+# Aggregate all grubkern sub-targets into one dependency list.
+GRUBKERN_DEPS = [
+    ":grubkern_util",
+    ":grubkern_kern",
+    ":grubkern_emu",
+    ":grubkern_lib",
+    ":grubkern_osdep",
+    ":grubkern_osdep_unix",
+    ":grubkern_osdep_dm",
+    ":grubkern_disk",
+    ":grubkern_extcmd",
+    ":grubkern_partmap",
+    ":grubkern_fs",
+]
+
+ALL_LIB_DEPS = GRUBKERN_DEPS + [
+    ":gnulib",
+    ":grubgcry",
+    ":grubmods",
+]
+
+# ---------------------------------------------------------------------------
+# grub-mkimage: host tool to assemble GRUB core.img
+#
+# util/config.c and grub-core/osdep/config.c have same basename;
+# osdep/config.c is split into a separate cc_library.
+# ---------------------------------------------------------------------------
+cc_library(
+    name = "mkimage_osdep_config",
+    srcs = ["@grub_src//:grub-core/osdep/config.c"],
+    copts = COMMON_COPTS,
+    linkstatic = True,
+    deps = COMMON_DEPS,
+)
+
+cc_binary(
+    name = "grub_mkimage",
+    srcs = [
+        "@grub_src//:util/grub-mkimage.c",
+        "@grub_src//:util/mkimage.c",
+        "@grub_src//:util/grub-mkimage32.c",
+        "@grub_src//:util/grub-mkimage64.c",
+        "@grub_src//:util/resolve.c",
+        "@grub_src//:grub-core/kern/emu/argp_common.c",
+        "@grub_src//:grub-core/osdep/init.c",
+        "@grub_src//:util/config.c",
+    ],
+    copts = COMMON_COPTS,
+    linkopts = ["-lm"],
+    deps = ALL_LIB_DEPS + COMMON_DEPS + [":mkimage_osdep_config"],
+)
+
+# ---------------------------------------------------------------------------
+# grub-bios-setup: host tool to install boot.img + core.img into MBR
+# ---------------------------------------------------------------------------
+cc_binary(
+    name = "grub_bios_setup",
+    srcs = [
+        "@grub_src//:util/grub-setup.c",
+        "@grub_src//:util/setup_bios.c",
+        "@grub_src//:grub-core/kern/emu/argp_common.c",
+        "@grub_src//:grub-core/lib/reed_solomon.c",
+        "@grub_src//:grub-core/osdep/blocklist.c",
+        "@grub_src//:grub-core/osdep/init.c",
+    ],
+    copts = COMMON_COPTS + ["-DGRUB_SETUP_FUNC=grub_util_bios_setup"],
+    deps = ALL_LIB_DEPS + COMMON_DEPS,
+)
+
+# ---------------------------------------------------------------------------
+# i386-pc platform images — built from GRUB 2.06 source with gcc -m32.
+#
+# boot.img           512 B  raw binary  (MBR boot sector)
+# diskboot.img       512 B  raw binary  (first sector of core.img)
+# lzma_decompress.img ~3 KB raw binary  (LZMA decompressor stub)
+# kernel.img         ~31 KB stripped ELF (GRUB kernel)
+#
+# grub-mkimage reads kernel.img + diskboot.img + lzma_decompress.img;
+# grub-bios-setup reads boot.img and writes it to the MBR.
+# ---------------------------------------------------------------------------
+genrule(
+    name = "build_platform_imgs",
+    srcs = [
+        "@grub_src//:platform_img_srcs",
+        # Explicit dep so $(location) can derive @grub_src root path.
+        "@grub_src//:grub-core/boot/i386/pc/boot.S",
+        "generated/config.h",
+        "generated/symlist.c",
+    ],
+    outs = [
+        "boot.img",
+        "diskboot.img",
+        "lzma_decompress.img",
+        "kernel.img",
+    ],
+    cmd = """
+        # Derive @grub_src root from any source file in that repo.
+        BOOT_S=$(location @grub_src//:grub-core/boot/i386/pc/boot.S)
+        GRUB_ROOT=$${BOOT_S%%/grub-core/boot/i386/pc/boot.S}
+
+        # Config dir (contains config.h and symlist.c).
+        CFG_H=$(location generated/config.h)
+        CFG_DIR=$$(dirname $$CFG_H)
+
+        $(location build_platform_imgs.sh) \
+            "$$GRUB_ROOT" "$$CFG_DIR" \
+            $(location boot.img) \
+            $(location diskboot.img) \
+            $(location lzma_decompress.img) \
+            $(location kernel.img)
+    """,
+    tools = ["build_platform_imgs.sh"],
+    # gcc -m32 only works on x86_64 hosts; arm64 hosts cannot produce
+    # i386-pc platform images (and KVM disk images are x86-only anyway).
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "platform_imgs",
+    srcs = [
+        ":boot.img",
+        ":diskboot.img",
+        ":kernel.img",
+        ":lzma_decompress.img",
+    ],
+    visibility = ["//visibility:public"],
+)
+

@@ -1,0 +1,75 @@
+--- a/util/setup.c	2026-06-26 14:03:23.057168495 +0800
++++ b/util/setup.c	2026-06-26 14:04:06.484390912 +0800
+@@ -316,10 +316,7 @@
+     char **cur;
+     int found = 0;
+ 
+-    if (!root_devices)
+-      grub_util_error (_("cannot find a device for %s (is /dev mounted?)"), dir);
+-
+-    for (cur = root_devices; *cur; cur++)
++    for (cur = root_devices; root_devices && *cur; cur++)
+       {
+ 	char *drive;
+ 	grub_device_t try_dev;
+@@ -355,15 +352,33 @@
+       }
+     if (!root_dev)
+       {
+-	grub_util_error ("guessing the root device failed, because of `%s'",
+-			 grub_errmsg);
++	/* The staging directory has no resolvable backing block device
++	   (e.g. it lives on overlayfs/tmpfs inside a build sandbox, where
++	   /proc/self/mountinfo reports a pseudo source like "overlay").
++	   When installing to a raw disk image the root device is
++	   irrelevant -- the GRUB prefix is baked into core.img and the MBR
++	   boot.img plus the embedded core.img are written to the
++	   destination disk directly -- so fall back to the destination
++	   disk as root_dev instead of aborting.  */
++	grub_errno = GRUB_ERR_NONE;
++	root_dev = grub_device_open (dest);
++	if (!root_dev)
++	  grub_util_error ("%s", grub_errmsg);
++	free (root);
++	root = xstrdup (dest);
++	grub_util_info ("no backing device for dir `%s'; "
++			"falling back to dest `%s'", dir, root);
+       }
+-    grub_util_info ("guessed root_dev `%s' from "
+-		    "dir `%s'", root_dev->disk->name, dir);
++    else
++      grub_util_info ("guessed root_dev `%s' from "
++		      "dir `%s'", root_dev->disk->name, dir);
+ 
+-    for (cur = root_devices; *cur; cur++)
+-      free (*cur);
+-    free (root_devices);
++    if (root_devices)
++      {
++	for (cur = root_devices; *cur; cur++)
++	  free (*cur);
++	free (root_devices);
++      }
+   }
+ 
+   grub_util_info ("setting the root device to `%s'", root);
+--- a/grub-core/osdep/unix/getroot.c	2026-06-26 14:03:23.058168523 +0800
++++ b/grub-core/osdep/unix/getroot.c	2026-06-26 14:03:33.327457589 +0800
+@@ -526,7 +526,16 @@
+ 	    {
+ 	      *cur = grub_canonicalize_file_name (tmp);
+ 	      if (*cur == NULL)
+-		grub_util_error (_("failed to get canonical path of `%s'"), tmp);
++		{
++		  /* A pseudo-filesystem source that is not a real block
++		     device path -- e.g. overlayfs reports its source as
++		     "overlay", tmpfs as "none".  It has no backing device
++		     to canonicalise or to install GRUB onto.  Drop the
++		     mountinfo result and fall back to the stat-based /dev
++		     scan below instead of aborting.  */
++		  *cur = tmp;
++		  break;
++		}
+ 	      free (tmp);
+ 	    }
+ 	  root = (strcmp (*cur, "/dev/root") == 0);

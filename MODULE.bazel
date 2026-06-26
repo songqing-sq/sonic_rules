@@ -384,6 +384,155 @@ cc_library(
 )
 
 # ----------------------------------------------------------------------------
+# GRUB 2.06 — grub-mkimage + grub-bios-setup hermetic host tools.
+#
+# Used by the sonic-vs.img.gz disk image assembly pipeline to generate
+# the GRUB i386-pc core.img (grub-mkimage) and to install it plus
+# boot.img into the MBR / BIOS Boot Partition (grub-bios-setup).
+# Previously these came from the host PATH (/usr/bin/grub-mkimage,
+# /usr/lib/grub/i386-pc/grub-bios-setup from apt grub-common +
+# grub-pc-bin). Now built from source as cc_binary host tools.
+#
+# The build_file_content below only exposes source headers and
+# exports_files; the compilation rules live in //grub/BUILD.bazel
+# which references @grub_src source .c files and local pre-generated
+# files (config.h, config-util.h, gnulib headers, bison/flex output,
+# libgrub_a_init.c) checked into //grub/generated/.
+# ----------------------------------------------------------------------------
+http_archive(
+    name = "grub_src",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["**"]))
+
+# Source files needed by //grub:platform_imgs genrule (i386-pc images built
+# from assembly/C with gcc -m32).  Glob is deliberately broad so that all
+# transitive #include'd headers and textually-included .S/.c files are
+# available in the sandbox.
+filegroup(
+    name = "platform_img_srcs",
+    srcs = glob([
+        "grub-core/boot/i386/pc/*.S",
+        "grub-core/kern/i386/**",
+        "grub-core/kern/*.c",
+        "grub-core/kern/generic/*.c",
+        "grub-core/term/i386/pc/*.c",
+        "grub-core/lib/reed_solomon.c",
+        "include/**/*.h",
+    ]),
+)
+
+# GRUB public headers (include/grub/*.h).
+cc_library(
+    name = "grub_hdrs",
+    hdrs = glob(["include/**/*.h"]),
+    includes = ["include", "."],
+)
+
+# gnulib source-tree headers (non-generated .h files alongside the .c sources).
+cc_library(
+    name = "gnulib_src_hdrs",
+    hdrs = glob(["grub-core/lib/gnulib/**/*.h"]),
+    includes = ["grub-core/lib/gnulib"],
+)
+
+# Extra internal headers for minilzo, xzembed, zstd, json, libgcrypt-grub.
+cc_library(
+    name = "extra_hdrs",
+    hdrs = glob([
+        "grub-core/lib/json/*.h",
+        "grub-core/lib/minilzo/*.h",
+        "grub-core/lib/xzembed/*.h",
+        "grub-core/lib/zstd/*.h",
+        "grub-core/lib/libgcrypt-grub/src/*.h",
+    ]),
+    includes = [
+        "grub-core/lib/json",
+        "grub-core/lib/minilzo",
+        "grub-core/lib/xzembed",
+        "grub-core/lib/zstd",
+        "grub-core/lib/libgcrypt-grub/src",
+    ],
+)
+
+# posix_wrap: GRUB's POSIX compatibility wrappers that shadow system
+# headers (sys/types.h, string.h, etc.) to map standard types to GRUB
+# native types (u32/u64/byte etc). Included globally in the GRUB
+# Makefile via CPPFLAGS_DEFAULT.
+cc_library(
+    name = "posix_wrap_hdrs",
+    hdrs = glob(["grub-core/lib/posix_wrap/**/*.h"]),
+    includes = ["grub-core/lib/posix_wrap"],
+)
+
+# libgcrypt cipher wrapper headers: the cipher/ directory has thin
+# wrapper .h files (g10lib.h, types.h, cipher.h, etc.) that shadow
+# the originals in src/ and redirect to GRUB native types. This
+# library must be depended on INSTEAD OF src/ for cipher code.
+cc_library(
+    name = "gcrypt_cipher_hdrs",
+    hdrs = glob([
+        "grub-core/lib/libgcrypt-grub/cipher/*.h",
+        "grub-core/lib/libgcrypt_wrap/*.h",
+    ]),
+    includes = [
+        "grub-core/lib/libgcrypt-grub/cipher",
+        "grub-core/lib/libgcrypt_wrap",
+    ],
+)
+
+# gcrypt headers under include/grub/gcrypt/ — the cipher code does
+# #include <gcrypt.h> which must resolve to include/grub/gcrypt/gcrypt.h.
+cc_library(
+    name = "gcrypt_hdrs",
+    hdrs = glob(["include/grub/gcrypt/*.h"]),
+    includes = ["include/grub/gcrypt"],
+)
+
+# Textually-included .c files. GRUB uses #include "platform/file.c" to
+# dispatch to platform-specific implementations. These must be visible in
+# the sandbox when compiling the including .c, but must NOT be compiled as
+# separate translation units. textual_hdrs is the standard Bazel mechanism.
+cc_library(
+    name = "textual_includes",
+    textual_hdrs = glob([
+        "grub-core/kern/disk_common.c",
+        "grub-core/osdep/linux/*.c",
+        "grub-core/osdep/unix/*.c",
+        "grub-core/osdep/basic/*.c",
+        "grub-core/osdep/generic/*.c",
+        "grub-core/fs/cpio_common.c",
+        "grub-core/fs/minix.c",
+        "grub-core/fs/fat.c",
+        "grub-core/fs/bfs.c",
+        "grub-core/fs/ufs.c",
+        "grub-core/disk/mdraid_linux.c",
+        "grub-core/lib/gnulib/regex_internal.c",
+        "grub-core/lib/gnulib/regcomp.c",
+        "grub-core/lib/gnulib/regexec.c",
+        "util/setup.c",
+        "util/grub-mkimagexx.c",
+    ]),
+)
+""",
+    sha256 = "23b64b4c741569f9426ed2e3d0e6780796fca081bee4c99f62aa3f53ae803f5f",
+    strip_prefix = "grub-2.06",
+    urls = ["https://ftp.gnu.org/gnu/grub/grub-2.06.tar.gz"],
+    # Patch grub-bios-setup so installing to a raw disk image does not abort
+    # probing /proc/self/mountinfo when the staging dir has no backing block
+    # device (overlayfs/tmpfs in the Bazel sandbox): it now falls back to the
+    # destination disk as the root device. Lets SonicDiskImage run sandboxed
+    # without the no-sandbox annotation / `overlay` symlink workaround.
+    patch_args = ["-p1"],
+    # Force the host `patch` tool: Bazel's native patch implementation
+    # rejects this multi-hunk/multi-file modification (CONTENT_DOES_NOT_MATCH),
+    # while GNU patch applies it cleanly.
+    patch_tool = "patch",
+    patches = ["//grub:grub-bios-setup-no-mountinfo.patch"],
+)
+
+# ----------------------------------------------------------------------------
 # elfutils 0.190 — libelf + libdw hermetic native Bazel host libraries.
 #
 # Needed by pahole (@dwarves_src//:pahole), the BTF generator the kernel build
