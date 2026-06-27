@@ -1,0 +1,38 @@
+# Reusable SONiC kernel build rule logic (@sonic_build_infra//kernel).
+#
+# The rule IMPLEMENTATIONS live here; version/sha DATA + repo-rule
+# INSTANTIATION live in the @sonic-linux-kernel component (which can load its
+# kernel_version.bzl). The top-level macro is sonic_kernel (//kernel:defs.bzl).
+#
+# Build-coupled string_flags (referenced by the moved rules):
+#   secure_upgrade_mode / secure_upgrade_cert  -> manage_config attr defaults
+#   dest                                       -> kernel_debs_dist attr default
+# Version string_flags stay in the component (their defaults are version data).
+
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+
+package(default_visibility = ["//visibility:public"])
+
+string_flag(
+    name = "dest",
+    build_setting_default = "",
+)
+
+string_flag(
+    name = "secure_upgrade_mode",
+    build_setting_default = "",
+)
+
+string_flag(
+    name = "secure_upgrade_cert",
+    build_setting_default = "",
+)
+
+exports_files([
+    "kernel_sources.BUILD.tpl",
+])
+
+filegroup(
+    name = "bzl_srcs",
+    srcs = glob(["*.bzl"]),
+)

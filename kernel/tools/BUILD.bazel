@@ -1,0 +1,17 @@
+# Host-tool binary extractors for the kernel config + build actions.
+# flex/bison/m4/perl are surfaced from their rules_* toolchains via the
+# resolve_* rules in //kernel:host_tools.bzl. bc/depmod/cpio/pahole/make and the
+# libelf/libdw/zlib libraries come directly from //kernel_host_tools
+# (see //kernel:host_tools.bzl HOST_TOOL_ATTRS), so they are not re-declared here.
+
+load("//kernel:host_tools.bzl", "resolve_bison", "resolve_flex", "resolve_m4", "resolve_perl")
+
+package(default_visibility = ["//visibility:public"])
+
+resolve_flex(name = "flex_bin")
+
+resolve_bison(name = "bison_bin")
+
+resolve_m4(name = "m4_bin")
+
+resolve_perl(name = "perl_bin")
