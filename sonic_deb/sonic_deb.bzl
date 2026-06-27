@@ -2,8 +2,21 @@ load("@rules_cc//cc:action_names.bzl", "ACTION_NAMES")
 load("@rules_cc//cc:defs.bzl", "CcInfo", "cc_common")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
 load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
+load("@rules_distroless//apt:defs.bzl", "dpkg_statusd")
 load("@tar.bzl//:tar.bzl", "tar")
+load("@tar.bzl//tar:tar.bzl", tar_lib = "tar_lib")
+load("//config:arch.bzl", "DEBIAN_ARCH")
 load("//shared_library:shared_library.bzl", "SymlinkInfo")
+
+_CONTENT_BUILTIN_VARS = select({
+    Label("//config:cpu_x86_64"): {"LIBDIR": "/usr/lib/x86_64-linux-gnu"},
+    Label("//config:cpu_aarch64"): {"LIBDIR": "/usr/lib/aarch64-linux-gnu"},
+})
+
+def _resolvecontent_vars(key, content_vars):
+    for var_name, var_value in content_vars.items():
+        key = key.replace("${" + var_name + "}", var_value)
+    return key
 
 def _get_feature_configuration(ctx, cc_toolchain):
     """Create a feature configuration from the CC toolchain."""
@@ -67,28 +80,49 @@ def _parse_key(key):
     """Parse a mtree key string into (package_dir, strip_prefix, mode).
 
     Key formats:
-      /dir:prefix:mode  -> 3 parts
-      /dir/*:mode       -> 2 parts, wildcard strip
-      /dir:mode         -> 2 parts, no strip
+      /dir                  -> default mode 0644, no strip
+      /dir/*                -> default mode 0644, wildcard strip (shorthand)
+      /dir:strip            -> default mode 0644, explicit strip prefix
+                               (use "*" for wildcard, "" for none)
+      /dir:strip:mode       -> explicit mode (octal "0644"/"755")
+                               strip may be "" (no strip) or "*" (wildcard)
+
+    Mode REQUIRES the 3-part form. "/dir:0644" means strip_prefix="0644",
+    NOT mode=0644. Use "/dir::0644" for the no-strip-with-mode case.
+
+    The "/dir/*" shorthand cannot be combined with an explicit strip prefix.
     """
     parts = key.split(":")
+    if len(parts) > 3:
+        fail("sonic_deb content key has too many ':' segments (max 3): %r" % key)
+
     package_dir = parts[0]
-    if len(parts) == 3:
-        strip_prefix = parts[1]
-        mode = parts[2]
-    elif len(parts) == 2:
-        if package_dir.endswith("/*"):
-            strip_prefix = "*"
-            mode = parts[1]
-            package_dir = package_dir[:-2]
-        else:
-            strip_prefix = ""
-            mode = parts[1]
+    has_wildcard_dir = package_dir.endswith("/*")
+    if has_wildcard_dir:
+        package_dir = package_dir[:-2]
+
+    explicit_strip = parts[1] if len(parts) >= 2 else None
+    if has_wildcard_dir and explicit_strip != None and explicit_strip not in ("", "*"):
+        fail(("sonic_deb content key combines '/*' shorthand with explicit " +
+              "strip prefix %r: %r") % (explicit_strip, key))
+
+    if has_wildcard_dir:
+        strip_prefix = "*"
+    elif explicit_strip:
+        strip_prefix = explicit_strip
     else:
         strip_prefix = ""
+
+    if len(parts) == 3:
+        mode = parts[2]
+        if not (mode.isdigit() and len(mode) in (3, 4)):
+            fail(("sonic_deb content key has invalid mode %r " +
+                  "(expected 3- or 4-digit octal): %r") % (mode, key))
+        if len(mode) == 3:
+            mode = "0" + mode
+    else:
         mode = "0644"
-    if len(mode) == 3 and mode.isdigit():
-        mode = "0" + mode
+
     return package_dir, strip_prefix, mode
 
 def _add_parents(path, seen_dirs, lines):
@@ -108,23 +142,7 @@ def _add_parents(path, seen_dirs, lines):
 
 def _compute_install_path(short_path, target_package, key):
     """Compute the install path for a file based on mtree-style key."""
-    parts = key.split(":")
-    package_dir = parts[0]
-
-    # Handle key formats (same logic as _sonic_mtree_spec_impl):
-    #   /dir:prefix:mode  -> 3 parts
-    #   /dir/*:mode       -> 2 parts, wildcard
-    #   /dir:mode         -> 2 parts, no strip
-    if len(parts) == 3:
-        strip_prefix = parts[1]
-    elif len(parts) == 2:
-        if package_dir.endswith("/*"):
-            strip_prefix = "*"
-            package_dir = package_dir[:-2]
-        else:
-            strip_prefix = ""
-    else:
-        strip_prefix = ""
+    package_dir, strip_prefix, _ = _parse_key(key)
 
     is_wildcard = (strip_prefix == "*")
     if strip_prefix and not is_wildcard and not strip_prefix.endswith("/"):
@@ -171,18 +189,28 @@ def _sonic_md5sums_impl(ctx):
     script_parts.append("> $OUTPUT")
     script_parts.append("")
 
+    content_vars = ctx.attr.content_vars
     for i, src in enumerate(srcs):
-        key = keys[i]
+        key = _resolvecontent_vars(keys[i], content_vars)
         target_package = src.label.package
 
         for f in src.files.to_list():
             if f.is_symlink:
                 continue
-            install_path = _compute_install_path(f.short_path, target_package, key)
-            script_parts.append("if [ -f \"" + f.path + "\" ]; then")
-            script_parts.append("    HASH=$(md5sum \"" + f.path + "\" | cut -d\" \" -f1)")
-            script_parts.append("    printf \"%s  ./" + install_path + "\\n\" \"$HASH\" >> $OUTPUT")
-            script_parts.append("fi")
+            if f.is_directory:
+                package_dir, _, _ = _parse_key(key)
+                dir_install = package_dir.strip("/")
+                script_parts.append("find '" + f.path + "' -type f | sort | while IFS= read -r fp; do")
+                script_parts.append("    rel=\"${fp#" + f.path + "/}\"")
+                script_parts.append("    HASH=$(md5sum \"$fp\" | cut -d\" \" -f1)")
+                script_parts.append("    printf \"%s  ./" + dir_install + "/%s\\n\" \"$HASH\" \"$rel\" >> $OUTPUT")
+                script_parts.append("done")
+            else:
+                install_path = _compute_install_path(f.short_path, target_package, key)
+                script_parts.append("if [ -f \"" + f.path + "\" ]; then")
+                script_parts.append("    HASH=$(md5sum \"" + f.path + "\" | cut -d\" \" -f1)")
+                script_parts.append("    printf \"%s  ./" + install_path + "\\n\" \"$HASH\" >> $OUTPUT")
+                script_parts.append("fi")
 
     ctx.actions.run_shell(
         outputs = [out],
@@ -198,6 +226,52 @@ _sonic_md5sums = rule(
     attrs = {
         "srcs": attr.label_list(allow_files = True, mandatory = True),
         "keys": attr.string_list(mandatory = True),
+        "content_vars": attr.string_dict(default = {}),
+    },
+)
+
+def _sonic_md5sums_from_tar_impl(ctx):
+    """Generate dpkg md5sums file by STREAMING a (gzipped) data tar.
+
+    The data tar is expected to be rooted at `./` with in-image paths like
+    `./usr/share/foo`. Emits one line per regular file:
+    `<md5>  <path-without-leading-./>`, sorted by path. Skips directory and
+    symlink entries.
+
+    md5sums_from_tar.py reads the tar once in-process (no on-disk extract) and
+    hashes each member with hashlib (no per-file `md5sum` fork) -- the device-
+    data deb alone has thousands of small files, so the old extract+fork path
+    wrote+reread every file and forked md5sum thousands of times.
+    """
+    out = ctx.actions.declare_file(ctx.label.name + ".md5sums")
+    data_tar = ctx.file.data_tar
+    tool = ctx.executable._md5_tool
+
+    ctx.actions.run(
+        executable = tool,
+        arguments = [data_tar.path, out.path],
+        inputs = [data_tar],
+        outputs = [out],
+        # py_binary output is a wrapper script; its runfiles carry the
+        # interpreter + md5sums_from_tar.py, so they must travel with it.
+        tools = depset(
+            direct = [tool],
+            transitive = [ctx.attr._md5_tool[DefaultInfo].default_runfiles.files],
+        ),
+        mnemonic = "DebMd5sums",
+        progress_message = "Computing md5sums for %s" % ctx.attr.name,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+_sonic_md5sums_from_tar = rule(
+    implementation = _sonic_md5sums_from_tar_impl,
+    attrs = {
+        "data_tar": attr.label(allow_single_file = True, mandatory = True),
+        "_md5_tool": attr.label(
+            default = Label("//sonic_deb:md5sums_from_tar"),
+            executable = True,
+            cfg = "exec",
+        ),
     },
 )
 
@@ -217,8 +291,10 @@ def _sonic_stripped_md5sums_impl(ctx):
 
     # Compute install paths from keys
     keys = ctx.attr.keys
+    content_vars = ctx.attr.content_vars
     entries = []
-    for i, key in enumerate(keys):
+    for i, key_raw in enumerate(keys):
+        key = _resolvecontent_vars(key_raw, content_vars)
         target = ctx.attr.srcs[i]
         files = target.files.to_list()
         for f in files:
@@ -226,7 +302,7 @@ def _sonic_stripped_md5sums_impl(ctx):
                 continue
 
             # Find corresponding stripped file
-            stripped_file = stripped_root + "/" + f.basename
+            stripped_file = stripped_root + "/" + _stripped_name(f)
             install_path = f.basename
 
             # Compute proper install path from key
@@ -275,12 +351,17 @@ _sonic_stripped_md5sums = rule(
         "stripped_dir": attr.label(mandatory = True),
         "srcs": attr.label_list(allow_files = True),
         "keys": attr.string_list(),
+        "content_vars": attr.string_dict(default = {}),
     },
 )
 
 def _sonic_control_tar_impl(ctx):
     """Generate control.tar.gz for a debian package."""
     output_tar = ctx.actions.declare_file(ctx.label.name + "_control.tar.gz")
+
+    # Use the sealed bsdtar from @tar.bzl instead of system tar.
+    bsdtar = ctx.toolchains[tar_lib.toolchain_type]
+    tar_path = bsdtar.tarinfo.binary.path
 
     # Collect transitive depends from DebInfo
     auto_depends = []
@@ -353,8 +434,32 @@ def _sonic_control_tar_impl(ctx):
     # installed_size placeholder; will be replaced by actual size in shell script if 0
     control_lines.append("Installed-Size: %d" % ctx.attr.installed_size)
 
+    if ctx.attr.pre_depends:
+        control_lines.append("Pre-Depends: %s" % ", ".join(ctx.attr.pre_depends))
+
     if all_depends:
         control_lines.append("Depends: %s" % ", ".join(all_depends))
+
+    if ctx.attr.recommends:
+        control_lines.append("Recommends: %s" % ", ".join(ctx.attr.recommends))
+
+    if ctx.attr.suggests:
+        control_lines.append("Suggests: %s" % ", ".join(ctx.attr.suggests))
+
+    if ctx.attr.conflicts:
+        control_lines.append("Conflicts: %s" % ", ".join(ctx.attr.conflicts))
+
+    if ctx.attr.breaks:
+        control_lines.append("Breaks: %s" % ", ".join(ctx.attr.breaks))
+
+    if ctx.attr.replaces:
+        control_lines.append("Replaces: %s" % ", ".join(ctx.attr.replaces))
+
+    if ctx.attr.provides:
+        control_lines.append("Provides: %s" % ", ".join(ctx.attr.provides))
+
+    if ctx.attr.enhances:
+        control_lines.append("Enhances: %s" % ", ".join(ctx.attr.enhances))
 
     control_lines.append("Description: %s" % ctx.attr.description)
 
@@ -425,13 +530,19 @@ def _sonic_control_tar_impl(ctx):
     script_parts.append("")
 
     # Write maintainer scripts if provided
-    for script_name in ["preinst", "postinst", "prerm", "postrm"]:
+    for script_name in ["preinst", "postinst", "prerm", "postrm", "config"]:
         attr_val = getattr(ctx.file, script_name, None)
         if attr_val:
             inputs.append(attr_val)
             script_parts.append('if [ -n "$' + script_name.upper() + '" ]; then')
             script_parts.append("    cp $" + script_name.upper() + " $WORKDIR/" + script_name)
             script_parts.append("fi")
+
+    script_parts.append("")
+    script_parts.append("# Write debconf templates if provided")
+    script_parts.append('if [ -n "$TEMPLATES" ]; then')
+    script_parts.append("    cp $TEMPLATES $WORKDIR/templates")
+    script_parts.append("fi")
 
     script_parts.append("")
     script_parts.append("# Write conffiles if provided")
@@ -447,7 +558,7 @@ def _sonic_control_tar_impl(ctx):
 
     script_parts.append("")
     script_parts.append("# Pack control.tar.gz")
-    script_parts.append("tar -czf $OUTPUT --owner=0 --group=0 -C $WORKDIR .")
+    script_parts.append("\"%s\" -czf $OUTPUT --uid=0 --gid=0 -C $WORKDIR ." % tar_path)
 
     ctx.actions.write(script_file, "\n".join(script_parts) + "\n")
     inputs.append(script_file)
@@ -468,11 +579,14 @@ def _sonic_control_tar_impl(ctx):
         # Add .so files referenced in auto_shlibs to sandbox inputs
         inputs.extend(shlibs_so_files)
 
-    for script_name in ["preinst", "postinst", "prerm", "postrm"]:
+    for script_name in ["preinst", "postinst", "prerm", "postrm", "config"]:
         attr_val = getattr(ctx.file, script_name, None)
         if attr_val:
             env[script_name.upper()] = attr_val.path
             inputs.append(attr_val)
+    if ctx.file.templates:
+        env["TEMPLATES"] = ctx.file.templates.path
+        inputs.append(ctx.file.templates)
     if ctx.file.conffiles:
         env["CONFFILES"] = ctx.file.conffiles.path
         inputs.append(ctx.file.conffiles)
@@ -483,6 +597,7 @@ def _sonic_control_tar_impl(ctx):
     ctx.actions.run_shell(
         outputs = [output_tar],
         inputs = depset(inputs, transitive = [cc_toolchain.all_files]),
+        tools = bsdtar.default.files,
         command = "bash " + script_file.path,
         env = env,
         progress_message = "Creating control.tar.gz for %s" % ctx.attr.package,
@@ -503,6 +618,14 @@ _sonic_control_tar = rule(
         "homepage": attr.string(),
         "installed_size": attr.int(default = 0),
         "depends": attr.string_list(default = []),
+        "pre_depends": attr.string_list(default = []),
+        "recommends": attr.string_list(default = []),
+        "suggests": attr.string_list(default = []),
+        "conflicts": attr.string_list(default = []),
+        "breaks": attr.string_list(default = []),
+        "replaces": attr.string_list(default = []),
+        "provides": attr.string_list(default = []),
+        "enhances": attr.string_list(default = []),
         "md5sums_file": attr.label(allow_single_file = True),
         "shlibs": attr.label(allow_single_file = True),
         "conffiles": attr.label(allow_single_file = True),
@@ -510,6 +633,8 @@ _sonic_control_tar = rule(
         "postinst": attr.label(allow_single_file = True),
         "prerm": attr.label(allow_single_file = True),
         "postrm": attr.label(allow_single_file = True),
+        "config": attr.label(allow_single_file = True),
+        "templates": attr.label(allow_single_file = True),
         "triggers": attr.label(allow_single_file = True),
         "content_targets": attr.label_list(
             default = [],
@@ -518,7 +643,7 @@ _sonic_control_tar = rule(
         ),
     },
     fragments = ["cpp"],
-    toolchains = use_cc_toolchain(),
+    toolchains = use_cc_toolchain() + [tar_lib.toolchain_type],
 )
 
 def _sonic_deb_assemble_impl(ctx):
@@ -624,10 +749,13 @@ def _sonic_mtree_spec_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".spec")
     seen_dirs = {}
     lines = []
+    tree_artifacts = []
+    all_inputs = []
 
+    content_vars = ctx.attr.content_vars
     keys = ctx.attr.keys
     for i in range(len(keys)):
-        key = keys[i]
+        key = _resolvecontent_vars(keys[i], content_vars)
         target = ctx.attr.srcs[i]
         files = target.files.to_list()
         symlink_dest = ""
@@ -640,14 +768,77 @@ def _sonic_mtree_spec_impl(ctx):
         target_package = target.label.package
 
         for f in files:
-            path = _compute_install_path(f.short_path, target_package, key)
-            _add_parents(path, seen_dirs, lines)
-            if f.is_symlink:
+            all_inputs.append(f)
+            if f.is_directory:
+                package_dir, _, _ = _parse_key(key)
+                install_prefix = package_dir.strip("/")
+                tree_artifacts.append((f, install_prefix, mode))
+            elif f.is_symlink:
+                path = _compute_install_path(f.short_path, target_package, key)
+                _add_parents(path, seen_dirs, lines)
                 link_target = symlink_dest if symlink_dest else (extra_dest.get(f.path, f.path))
                 lines.append("./%s type=link mode=0777 link=%s uid=0 gid=0" % (path, link_target))
             else:
+                path = _compute_install_path(f.short_path, target_package, key)
+                _add_parents(path, seen_dirs, lines)
                 lines.append("./%s type=file mode=%s content=%s uid=0 gid=0" % (path, mode, f.path))
-    ctx.actions.write(out, content = "#mtree\n" + "\n".join(lines) + "\n")
+
+    # Empty directories: install paths that carry no files (e.g. Debian
+    # *.dirs entries like /var/lib/dhcp). Emit each (and its parents) as a
+    # type=dir entry so the resulting deb ships the empty directory.
+    for d in ctx.attr.empty_dirs:
+        d = _resolvecontent_vars(d, content_vars)
+        d = d.strip("/")
+        if not d:
+            continue
+        _add_parents(d + "/.", seen_dirs, lines)
+        if d not in seen_dirs:
+            lines.append("./%s type=dir mode=0755 uid=0 gid=0" % d)
+            seen_dirs[d] = True
+
+    if not tree_artifacts:
+        ctx.actions.write(out, content = "#mtree\n" + "\n".join(lines) + "\n")
+    else:
+        static_content = "#mtree\n" + "\n".join(lines) + "\n"
+        script_parts = ["cat > '{out}' << 'STATIC_MTREE_EOF'\n{static}\nSTATIC_MTREE_EOF".format(
+            out = out.path,
+            static = static_content,
+        )]
+        for tree_f, install_prefix, mode in tree_artifacts:
+            script_parts.append(
+                """# Emit parent dirs then files for tree artifact
+declare -A __seen_dirs
+emit_parents() {{
+  local p="$1"; local d=""
+  IFS='/' read -ra parts <<< "$p"
+  for ((i=0; i<${{#parts[@]}}-1; i++)); do
+    [ -z "${{parts[i]}}" ] && continue
+    if [ -n "$d" ]; then d="$d/${{parts[i]}}"; else d="${{parts[i]}}"; fi
+    if [ -z "${{__seen_dirs[$d]:-}}" ]; then
+      __seen_dirs[$d]=1
+      printf './%s type=dir mode=0755 uid=0 gid=0\\n' "$d" >> '{out}'
+    fi
+  done
+}}
+PREFIX='{prefix}'
+find '{tree}' -type f -o -type l | sort | while IFS= read -r fp; do
+  rel="${{fp#{tree}/}}"
+  if [ -n "$PREFIX" ]; then full="$PREFIX/$rel"; else full="$rel"; fi
+  emit_parents "$full"
+  printf './%s type=file mode={mode} content=%s uid=0 gid=0\\n' "$full" "$fp"
+done >> '{out}'""".format(
+                    tree = tree_f.path,
+                    prefix = install_prefix.rstrip("/"),
+                    mode = mode,
+                    out = out.path,
+                ),
+            )
+        ctx.actions.run_shell(
+            inputs = all_inputs,
+            outputs = [out],
+            command = "\n".join(script_parts),
+            mnemonic = "MtreeSpec",
+        )
     return [DefaultInfo(files = depset([out]))]
 
 sonic_mtree_spec = rule(
@@ -655,10 +846,24 @@ sonic_mtree_spec = rule(
     attrs = {
         "srcs": attr.label_list(allow_files = True),
         "keys": attr.string_list(),
+        "content_vars": attr.string_dict(default = {}),
+        "empty_dirs": attr.string_list(default = []),
     },
 )
 
 # --- strip_binaries and debug_symbols_pkg ---
+
+def _stripped_name(f):
+    """Collision-free name for a file inside the stripped output directory.
+
+    Using f.basename alone corrupts debs that ship two content files with the
+    same basename but different install paths (e.g. a binary `redis-cli` and a
+    bash-completion `redis-cli`): both would map to the same stripped file and
+    the last writer wins. f.short_path is unique per file, so flattening it
+    yields a stable, collision-free name shared by the strip action, the mtree
+    spec, and the md5sums generation.
+    """
+    return f.short_path.replace("../", "").replace("/", "_")
 
 def _strip_binaries_impl(ctx):
     """Strip binaries and prepare debug symbols using CC toolchain tools."""
@@ -700,30 +905,50 @@ def _strip_binaries_impl(ctx):
     script_parts.append("OBJCOPY=" + objcopy_path)
     script_parts.append("")
 
+    # strip_or_copy <src> <dst> <force_strip>: --strip-debug if the source is an
+    # ELF object, otherwise copy it verbatim. force_strip=1 short-circuits the
+    # ELF probe for files already known to be cc binaries (CcInfo / *.so name).
+    # The runtime ELF probe (\x7fELF magic) additionally catches
+    # rules_foreign_cc binaries, which carry no CcInfo and so are not in
+    # cc_targets, ensuring gen_dbg debs ship stripped binaries regardless of how
+    # the binary was produced. Non-ELF data files (configs, scripts, man pages)
+    # are always copied unchanged.
+    script_parts.append("strip_or_copy() {")
+    script_parts.append("    local src=\"$1\" dst=\"$2\" force=\"$3\"")
+    script_parts.append("    if [ \"$force\" = \"1\" ] || [ \"$(head -c 4 \"$src\" 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = \"7f454c46\" ]; then")
+    script_parts.append("        $OBJCOPY --strip-debug \"$src\" \"$dst\"")
+    script_parts.append("    else")
+    script_parts.append("        cp \"$src\" \"$dst\" 2>/dev/null || true")
+    script_parts.append("    fi")
+    script_parts.append("}")
+    script_parts.append("")
+
     for i, path in enumerate(input_paths):
         f = input_files[i]
-        is_cc_binary = path in cc_targets
+        force = "1" if path in cc_targets else "0"
+        out_name = _stripped_name(f)
 
         script_parts.append("if [ -e \"" + path + "\" ] && [[ \"" + path + "\" != *.params ]]; then")
+        script_parts.append("    BASENAME=" + out_name)
         script_parts.append("    if [ -L \"" + path + "\" ]; then")
-        script_parts.append("        BASENAME=$(basename \"" + path + "\")")
         script_parts.append("        LINK_TARGET=$(readlink \"" + path + "\")")
         script_parts.append("        if [[ \"$LINK_TARGET\" == /* ]]; then")
         script_parts.append("            if [ -f \"$LINK_TARGET\" ]; then")
-        if is_cc_binary:
-            script_parts.append("                $OBJCOPY --strip-debug \"$LINK_TARGET\" $OUTPUT_DIR/$BASENAME")
-        else:
-            script_parts.append("                cp \"$LINK_TARGET\" $OUTPUT_DIR/$BASENAME 2>/dev/null || true")
+        script_parts.append("                strip_or_copy \"$LINK_TARGET\" $OUTPUT_DIR/$BASENAME " + force)
         script_parts.append("            fi")
         script_parts.append("        else")
-        script_parts.append("            ln -s \"$LINK_TARGET\" $OUTPUT_DIR/$BASENAME")
+        # Relative symlink (e.g. libfoo.so.1 -> libfoo.so.1.2.3). Recreating the
+        # symlink verbatim would dangle inside the stripped tree artifact (the
+        # target is written under a different, mangled name), which fails
+        # Bazel's tree-artifact validation. Resolve the link against its own
+        # directory and copy/strip the real file instead.
+        script_parts.append("            RESOLVED=\"$(dirname \"" + path + "\")/$LINK_TARGET\"")
+        script_parts.append("            if [ -f \"$RESOLVED\" ]; then")
+        script_parts.append("                strip_or_copy \"$RESOLVED\" $OUTPUT_DIR/$BASENAME " + force)
+        script_parts.append("            fi")
         script_parts.append("        fi")
         script_parts.append("    elif [ -f \"" + path + "\" ]; then")
-        if is_cc_binary:
-            script_parts.append("        BASENAME=$(basename \"" + path + "\")")
-            script_parts.append("        $OBJCOPY --strip-debug \"" + path + "\" $OUTPUT_DIR/$BASENAME")
-        else:
-            script_parts.append("        cp \"" + path + "\" $OUTPUT_DIR/ 2>/dev/null || true")
+        script_parts.append("        strip_or_copy \"" + path + "\" $OUTPUT_DIR/$BASENAME " + force)
         script_parts.append("    fi")
         script_parts.append("fi")
         script_parts.append("")
@@ -752,6 +977,10 @@ def _debug_symbols_pkg_impl(ctx):
     """Extract debug symbols from ELF files and package them into a tar.gz."""
     output_tar = ctx.actions.declare_file(ctx.attr.name + ".tar.gz")
 
+    # Use the sealed bsdtar from @tar.bzl instead of system tar.
+    bsdtar = ctx.toolchains[tar_lib.toolchain_type]
+    tar_path = bsdtar.tarinfo.binary.path
+
     # Get objcopy from the CC toolchain via cc_common API.
     cc_toolchain = find_cc_toolchain(ctx)
     feature_configuration = _get_feature_configuration(ctx, cc_toolchain)
@@ -779,7 +1008,7 @@ def _debug_symbols_pkg_impl(ctx):
 
     for path in input_paths:
         script_parts.append("if [ -f \"" + path + "\" ] && [[ \"" + path + "\" != *.params ]]; then")
-        script_parts.append("    BUILDID=$($OBJCOPY --dump-section .note.gnu.build-id=/dev/stdout \"" + path + "\" 2>/dev/null | xxd -p | head -c 40 || true)")
+        script_parts.append("    BUILDID=$($OBJCOPY --dump-section .note.gnu.build-id=/dev/stdout \"" + path + "\" 2>/dev/null | od -An -tx1 | tr -d ' \\n' | head -c 40 || true)")
         script_parts.append('    if [ -n "$BUILDID" ] && [ ${#BUILDID} -ge 40 ] && echo "$BUILDID" | grep -qE "^[0-9a-fA-F]+$"; then')
         script_parts.append('        PREFIX="${BUILDID:0:2}"')
         script_parts.append('        SUFFIX="${BUILDID:2}"')
@@ -789,7 +1018,7 @@ def _debug_symbols_pkg_impl(ctx):
         script_parts.append("fi")
         script_parts.append("")
 
-    script_parts.append("tar -czf $OUTPUT --owner=0 --group=0 -C $OUTPUT_DIR .")
+    script_parts.append("\"%s\" -czf $OUTPUT --uid=0 --gid=0 -C $OUTPUT_DIR ." % tar_path)
 
     ctx.actions.write(script_file, "\n".join(script_parts) + "\n")
     all_inputs.append(script_file)
@@ -797,6 +1026,7 @@ def _debug_symbols_pkg_impl(ctx):
     ctx.actions.run_shell(
         outputs = [output_tar],
         inputs = depset(all_inputs, transitive = [cc_toolchain.all_files]),
+        tools = bsdtar.default.files,
         command = "bash " + script_file.path,
         env = {"OUTPUT": output_tar.path},
         progress_message = "Creating debug symbols package for %s" % ctx.attr.name,
@@ -810,7 +1040,7 @@ debug_symbols_pkg = rule(
         "srcs": attr.label_list(allow_files = True, mandatory = True),
     },
     fragments = ["cpp"],
-    toolchains = use_cc_toolchain(),
+    toolchains = use_cc_toolchain() + [tar_lib.toolchain_type],
 )
 
 def _stripped_mtree_spec_impl(ctx):
@@ -818,18 +1048,19 @@ def _stripped_mtree_spec_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".spec")
     seen_dirs = {}
     lines = []
+    tree_artifacts = []
 
     stripped_files = ctx.attr.stripped_dir.files.to_list()
     if not stripped_files:
         ctx.actions.write(out, content = "#mtree\n")
         return [DefaultInfo(files = depset([out]))]
 
-    # stripped_dir is a declare_directory output; files.to_list() returns the directory itself
     stripped_dir_path = stripped_files[0].path
 
+    content_vars = ctx.attr.content_vars
     keys = ctx.attr.keys
     for i in range(len(keys)):
-        key = keys[i]
+        key = _resolvecontent_vars(keys[i], content_vars)
         _, _, mode = _parse_key(key)
 
         target = ctx.attr.srcs[i]
@@ -842,19 +1073,76 @@ def _stripped_mtree_spec_impl(ctx):
             extra_dest = target[SymlinkInfo].extra_dest
 
         for f in files:
-            # For stripped binaries, compute install path using the key but
-            # replace the content path with the stripped file path
-            path = _compute_install_path(f.short_path, target.label.package, key)
-            _add_parents(path, seen_dirs, lines)
-
-            if f.is_symlink:
+            if f.is_directory:
+                package_dir, _, _ = _parse_key(key)
+                install_prefix = package_dir.strip("/")
+                tree_artifacts.append((f, install_prefix, mode))
+            elif f.is_symlink:
+                path = _compute_install_path(f.short_path, target.label.package, key)
+                _add_parents(path, seen_dirs, lines)
                 link_target = symlink_dest if symlink_dest else (extra_dest.get(f.path, f.path))
                 lines.append("./%s type=link mode=0777 link=%s uid=0 gid=0" % (path, link_target))
             else:
-                stripped_file_path = stripped_dir_path + "/" + f.basename
+                path = _compute_install_path(f.short_path, target.label.package, key)
+                _add_parents(path, seen_dirs, lines)
+                stripped_file_path = stripped_dir_path + "/" + _stripped_name(f)
                 lines.append("./%s type=file mode=%s content=%s uid=0 gid=0" % (path, mode, stripped_file_path))
 
-    ctx.actions.write(out, content = "#mtree\n" + "\n".join(lines) + "\n")
+    # Empty directories (Debian *.dirs entries with no files). See the
+    # matching block in _sonic_mtree_spec_impl.
+    for d in ctx.attr.empty_dirs:
+        d = _resolvecontent_vars(d, content_vars)
+        d = d.strip("/")
+        if not d:
+            continue
+        _add_parents(d + "/.", seen_dirs, lines)
+        if d not in seen_dirs:
+            lines.append("./%s type=dir mode=0755 uid=0 gid=0" % d)
+            seen_dirs[d] = True
+
+    if not tree_artifacts:
+        ctx.actions.write(out, content = "#mtree\n" + "\n".join(lines) + "\n")
+    else:
+        static_content = "#mtree\n" + "\n".join(lines) + "\n"
+        script_parts = ["cat > '{out}' << 'STATIC_MTREE_EOF'\n{static}\nSTATIC_MTREE_EOF".format(
+            out = out.path,
+            static = static_content,
+        )]
+        for tree_f, install_prefix, mode in tree_artifacts:
+            script_parts.append(
+                """# Emit parent dirs then files for tree artifact
+declare -A __seen_dirs
+emit_parents() {{
+  local p="$1"; local d=""
+  IFS='/' read -ra parts <<< "$p"
+  for ((i=0; i<${{#parts[@]}}-1; i++)); do
+    [ -z "${{parts[i]}}" ] && continue
+    if [ -n "$d" ]; then d="$d/${{parts[i]}}"; else d="${{parts[i]}}"; fi
+    if [ -z "${{__seen_dirs[$d]:-}}" ]; then
+      __seen_dirs[$d]=1
+      printf './%s type=dir mode=0755 uid=0 gid=0\\n' "$d" >> '{out}'
+    fi
+  done
+}}
+PREFIX='{prefix}'
+find '{tree}' -type f -o -type l | sort | while IFS= read -r fp; do
+  rel="${{fp#{tree}/}}"
+  if [ -n "$PREFIX" ]; then full="$PREFIX/$rel"; else full="$rel"; fi
+  emit_parents "$full"
+  printf './%s type=file mode={mode} content=%s uid=0 gid=0\\n' "$full" "$fp"
+done >> '{out}'""".format(
+                    tree = tree_f.path,
+                    prefix = install_prefix.rstrip("/"),
+                    mode = mode,
+                    out = out.path,
+                ),
+            )
+        ctx.actions.run_shell(
+            inputs = stripped_files + [f for f, _, _ in tree_artifacts],
+            outputs = [out],
+            command = "\n".join(script_parts),
+            mnemonic = "StrippedMtreeSpec",
+        )
     return [DefaultInfo(files = depset([out]))]
 
 stripped_mtree_spec = rule(
@@ -863,6 +1151,8 @@ stripped_mtree_spec = rule(
         "srcs": attr.label_list(allow_files = True),
         "keys": attr.string_list(),
         "stripped_dir": attr.label(mandatory = True),
+        "content_vars": attr.string_dict(default = {}),
+        "empty_dirs": attr.string_list(default = []),
     },
 )
 
@@ -872,6 +1162,10 @@ def _sonic_dbg_md5sums_impl(ctx):
     """Generate md5sums for a debug symbols tar.gz by extracting and computing."""
     output_md5 = ctx.actions.declare_file(ctx.label.name + ".md5sums")
 
+    # Use the sealed bsdtar from @tar.bzl instead of system tar.
+    bsdtar = ctx.toolchains[tar_lib.toolchain_type]
+    tar_path = bsdtar.tarinfo.binary.path
+
     script_file = ctx.actions.declare_file(ctx.attr.name + ".sh")
     script_parts = []
     script_parts.append("#!/bin/bash")
@@ -879,7 +1173,7 @@ def _sonic_dbg_md5sums_impl(ctx):
     script_parts.append("SANDBOX_ROOT=$(pwd)")
     script_parts.append("WORKDIR=$(mktemp -d)")
     script_parts.append('trap "rm -rf $WORKDIR" EXIT')
-    script_parts.append("tar -xzf $DEBUG_TAR -C $WORKDIR")
+    script_parts.append("\"%s\" -xzf $DEBUG_TAR -C $WORKDIR" % tar_path)
     script_parts.append("cd $WORKDIR")
     script_parts.append("find . -type f -exec md5sum {} \\; > $SANDBOX_ROOT/$OUTPUT")
 
@@ -888,6 +1182,7 @@ def _sonic_dbg_md5sums_impl(ctx):
     ctx.actions.run_shell(
         outputs = [output_md5],
         inputs = [ctx.file.debug_tar, script_file],
+        tools = bsdtar.default.files,
         command = "bash " + script_file.path,
         env = {
             "DEBUG_TAR": ctx.file.debug_tar.path,
@@ -903,6 +1198,7 @@ _sonic_dbg_md5sums = rule(
     attrs = {
         "debug_tar": attr.label(mandatory = True, allow_single_file = True),
     },
+    toolchains = [tar_lib.toolchain_type],
 )
 
 # --- Main sonic_deb macro ---
@@ -913,6 +1209,7 @@ def _sonic_deb_impl(
         content,
         content_targets = [],
         gen_dbg = False,
+        empty_dirs = [],
         **kwargs):
     """Implementation of the sonic_deb macro.
 
@@ -926,6 +1223,10 @@ def _sonic_deb_impl(
             keys.append(key)
             flat_srcs.append(f)
 
+    content_vars = {}
+    if any(["${" in k for k in keys]) or any(["${" in d for d in empty_dirs]):
+        content_vars = _CONTENT_BUILTIN_VARS
+
     all_content_targets = flat_srcs + content_targets
 
     package_name = kwargs.get("package", name)
@@ -934,19 +1235,29 @@ def _sonic_deb_impl(
     description = kwargs.get("description", "")
 
     # Common kwargs extracted once to avoid repetition
-    architecture = kwargs.get("architecture", "amd64")
+    architecture = kwargs.get("architecture", DEBIAN_ARCH)
     distribution = kwargs.get("distribution", "unstable")
     urgency = kwargs.get("urgency", "medium")
     section = kwargs.get("section")
     priority = kwargs.get("priority")
     homepage = kwargs.get("homepage")
     depends = kwargs.get("depends", [])
+    pre_depends = kwargs.get("pre_depends", [])
+    recommends = kwargs.get("recommends", [])
+    suggests = kwargs.get("suggests", [])
+    conflicts = kwargs.get("conflicts", [])
+    breaks = kwargs.get("breaks", [])
+    replaces = kwargs.get("replaces", [])
+    provides = kwargs.get("provides", [])
+    enhances = kwargs.get("enhances", [])
     shlibs = kwargs.get("shlibs")
     conffiles_file = kwargs.get("conffiles_file")
     preinst = kwargs.get("preinst")
     postinst = kwargs.get("postinst")
     prerm = kwargs.get("prerm")
     postrm = kwargs.get("postrm")
+    config = kwargs.get("config")
+    templates = kwargs.get("templates")
     triggers = kwargs.get("triggers")
     package_file_name = kwargs.get("package_file_name")
 
@@ -963,13 +1274,16 @@ def _sonic_deb_impl(
             srcs = flat_srcs,
             keys = keys,
             stripped_dir = ":" + name + "_stripped",
+            content_vars = content_vars,
+            empty_dirs = empty_dirs,
         )
 
         tar(
             name = name + "_data",
-            srcs = [":" + name + "_stripped"],
+            srcs = [":" + name + "_stripped"] + flat_srcs,
             mtree = ":" + name + "_spec",
             compress = "gzip",
+            visibility = visibility,
         )
 
         _sonic_stripped_md5sums(
@@ -977,6 +1291,7 @@ def _sonic_deb_impl(
             stripped_dir = ":" + name + "_stripped",
             srcs = flat_srcs,
             keys = keys,
+            content_vars = content_vars,
         )
 
     else:
@@ -986,6 +1301,8 @@ def _sonic_deb_impl(
             name = name + "_spec",
             srcs = flat_srcs,
             keys = keys,
+            content_vars = content_vars,
+            empty_dirs = empty_dirs,
         )
 
         tar(
@@ -993,12 +1310,14 @@ def _sonic_deb_impl(
             srcs = flat_srcs,
             mtree = ":" + name + "_spec",
             compress = "gzip",
+            visibility = visibility,
         )
 
         _sonic_md5sums(
             name = name + "_md5sums",
             srcs = flat_srcs,
             keys = keys,
+            content_vars = content_vars,
         )
 
     # === Common: control tar and deb assembly for main package ===
@@ -1013,6 +1332,14 @@ def _sonic_deb_impl(
         priority = priority if priority else "optional",
         homepage = homepage,
         depends = depends,
+        pre_depends = pre_depends,
+        recommends = recommends,
+        suggests = suggests,
+        conflicts = conflicts,
+        breaks = breaks,
+        replaces = replaces,
+        provides = provides,
+        enhances = enhances,
         md5sums_file = ":" + name + "_md5sums",
         shlibs = shlibs,
         conffiles = conffiles_file,
@@ -1020,8 +1347,11 @@ def _sonic_deb_impl(
         postinst = postinst,
         prerm = prerm,
         postrm = postrm,
+        config = config,
+        templates = templates,
         triggers = triggers,
         content_targets = all_content_targets,
+        visibility = visibility,
     )
 
     _sonic_deb_assemble(
@@ -1036,6 +1366,13 @@ def _sonic_deb_impl(
         section = section if section else "misc",
         priority = priority if priority else "optional",
         package_file_name = package_file_name,
+        visibility = visibility,
+    )
+
+    dpkg_statusd(
+        name = name + "_statusd",
+        package_name = package_name,
+        control = ":" + name + "_control",
         visibility = visibility,
     )
 
@@ -1071,6 +1408,7 @@ def _sonic_deb_impl(
             depends = depends,
             md5sums_file = ":" + dbg_name + "_md5sums",
             content_targets = all_content_targets,
+            visibility = visibility,
         )
 
         _sonic_deb_assemble(
@@ -1103,24 +1441,49 @@ def sonic_deb(name, content, data = None, gen_dbg = False, visibility = ["//visi
         version = kwargs.get("version", "1.0.0")
         section = kwargs.get("section")
         priority = kwargs.get("priority")
+
+        # If the caller didn't supply md5sums_file, compute it from the data tar.
+        # The dpkg_statusd action requires `./md5sums` inside the control tar,
+        # so this must always be present.
+        md5sums_label = kwargs.get("md5sums_file")
+        if not md5sums_label:
+            _sonic_md5sums_from_tar(
+                name = name + "_md5sums",
+                data_tar = data,
+                visibility = ["//visibility:private"],
+            )
+            md5sums_label = ":" + name + "_md5sums"
+
         _sonic_control_tar(
             name = name + "_control",
             package = package_name,
             version = version,
-            architecture = kwargs.get("architecture", "amd64"),
+            architecture = kwargs.get("architecture", DEBIAN_ARCH),
             maintainer = kwargs.get("maintainer", ""),
             description = kwargs.get("description", ""),
             section = section,
             priority = priority,
             homepage = kwargs.get("homepage"),
             depends = kwargs.get("depends", []),
+            pre_depends = kwargs.get("pre_depends", []),
+            recommends = kwargs.get("recommends", []),
+            suggests = kwargs.get("suggests", []),
+            conflicts = kwargs.get("conflicts", []),
+            breaks = kwargs.get("breaks", []),
+            replaces = kwargs.get("replaces", []),
+            provides = kwargs.get("provides", []),
+            enhances = kwargs.get("enhances", []),
             shlibs = kwargs.get("shlibs"),
+            md5sums_file = md5sums_label,
             conffiles = kwargs.get("conffiles_file"),
             preinst = kwargs.get("preinst"),
             postinst = kwargs.get("postinst"),
             prerm = kwargs.get("prerm"),
             postrm = kwargs.get("postrm"),
+            config = kwargs.get("config"),
+            templates = kwargs.get("templates"),
             triggers = kwargs.get("triggers"),
+            visibility = visibility,
         )
         _sonic_deb_assemble(
             name = name,
@@ -1128,12 +1491,18 @@ def sonic_deb(name, content, data = None, gen_dbg = False, visibility = ["//visi
             control_tar = ":" + name + "_control",
             package = package_name,
             version = version,
-            architecture = kwargs.get("architecture", "amd64"),
+            architecture = kwargs.get("architecture", DEBIAN_ARCH),
             distribution = kwargs.get("distribution", "unstable"),
             urgency = kwargs.get("urgency", "medium"),
             section = section if section else "misc",
             priority = priority if priority else "optional",
             package_file_name = kwargs.get("package_file_name"),
+            visibility = visibility,
+        )
+        dpkg_statusd(
+            name = name + "_statusd",
+            package_name = package_name,
+            control = ":" + name + "_control",
             visibility = visibility,
         )
         return

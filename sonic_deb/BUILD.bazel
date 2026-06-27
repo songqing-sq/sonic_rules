@@ -1,1 +1,11 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
 package(default_visibility = ["//visibility:public"])
+
+# Streams a (gzipped) data tar and emits the dpkg md5sums control file in one
+# in-process pass -- no on-disk extract, no per-file md5sum fork. Used by the
+# _sonic_md5sums_from_tar rule in sonic_deb.bzl.
+py_binary(
+    name = "md5sums_from_tar",
+    srcs = ["md5sums_from_tar.py"],
+)

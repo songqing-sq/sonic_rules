@@ -33,7 +33,7 @@ sonic_deb(
     name = "test_deb",
     architecture = "amd64",
     content = {
-        "/usr/bin/*:0755": [":test_binary"],
+        "/usr/bin:*:0755": [":test_binary"],
     },
     description = "Test deb package for sonic_deb redesign",
     maintainer = "SONiC Test <test@sonic-switch.org>",
@@ -62,7 +62,7 @@ sonic_deb(
     name = "test_deb_dbg",
     architecture = "amd64",
     content = {
-        "/usr/lib/*:0644": [":test_shared_lib"],
+        "/usr/lib:*:0644": [":test_shared_lib"],
     },
     description = "Test deb with debug symbols",
     gen_dbg = True,
@@ -215,7 +215,7 @@ sonic_deb(
     name = "test_libfoo",
     architecture = "amd64",
     content = {
-        "/usr/lib/*:0644": [":testfoo_files"],
+        "/usr/lib:*:0644": [":testfoo_files"],
     },
     description = "Test shared library runtime package",
     gen_dbg = True,
@@ -230,8 +230,8 @@ sonic_deb(
     name = "test_libfoo_dev",
     architecture = "amd64",
     content = {
-        "/usr/lib/*:0644": [":testfoo_dev_link"],
-        "/usr/include/*:0644": [":testfoo_hdr_files"],
+        "/usr/lib:*:0644": [":testfoo_dev_link"],
+        "/usr/include:*:0644": [":testfoo_hdr_files"],
     },
     description = "Test shared library development package",
     maintainer = "SONiC Test <test@sonic-switch.org>",
