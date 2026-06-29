@@ -62,8 +62,8 @@ fetch_gcc(
 
 fetch_gcc(
     name = "gcc-linux-aarch64",
-    integrity = "sha256-ew4lEzqY1EtkipJboR9ko63EcOh2aK+Aziw684nr6b4=",
-    urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-12.5.0-aarch64.tar.xz"],
+    integrity = "sha256-dLHwBydp+IZbYol6uWL2/OF0EV2rLmWWdlu05wD/4NE=",
+    urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-14.3.0-aarch64.tar.xz"],
     prefix = "aarch64-linux",
 )
 
