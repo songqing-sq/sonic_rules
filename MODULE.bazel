@@ -2924,6 +2924,5 @@ cc_binary(
     strip_prefix = "make-4.4.1",
     urls = [
         "https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz",
-        "https://mirrors.aliyun.com/gnu/make/make-4.4.1.tar.gz",
     ],
 )

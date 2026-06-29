@@ -1,3 +1,0 @@
-[submodule "bazelbuild/rules_pkg"]
-	path = bazelbuild/rules_pkg
-	url = git@gitlab.alibaba-inc.com:songqing.sq/rules_pkg.git

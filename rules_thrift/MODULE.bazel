@@ -92,22 +92,22 @@ register_toolchains("@rules_thrift//:thrift_toolchain")
 bazel_dep(name = "rules_distroless", version = "0.0.0", repo_name = "rules_deb", dev_dependency = True)
 git_override(
     module_name = "rules_distroless",
-    commit = "cf7a013",
-    remote = "git@gitlab.alibaba-inc.com:SONiC/rules_distroless.git",
+    commit = "815b4b3372642c5a9c2a48f932b1e2371fead4cb",
+    remote = "https://github.com/songqing-sq/rules_distroless.git",
 )
 
 apt = use_extension("@rules_deb//apt:extensions.bzl", "apt", dev_dependency = True)
 apt.sources_list(
     architectures = ["amd64", "arm64"],
     components = ["main"],
-    suites = ["bookworm", "bookworm-updates"],
-    uris = ["https://sonic-build.alibaba-inc.com/debian_snapshot/20260410"],
+    suites = ["trixie", "trixie-updates"],
+    uris = ["https://snapshot.debian.org/archive/debian/20260409T202916Z"],
 )
 apt.sources_list(
     architectures = ["amd64", "arm64"],
     components = ["main"],
-    suites = ["bookworm-security"],
-    uris = ["https://sonic-build.alibaba-inc.com/debian_snapshot/20260410"],
+    suites = ["trixie-security"],
+    uris = ["https://snapshot.debian.org/archive/debian-security/20260409T182303Z"],
 )
 apt.install(
     dependency_set = "thrift_test_deps",
@@ -115,7 +115,7 @@ apt.install(
         "libthrift-dev",
         "libboost-dev",
     ],
-    suites = ["bookworm", "bookworm-updates", "bookworm-security"],
+    suites = ["trixie", "trixie-updates", "trixie-security"],
 )
 use_repo(apt, "thrift_test_deps")
 
