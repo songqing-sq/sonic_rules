@@ -17,8 +17,8 @@ directory(
         [
             "include/**",
             "*/include/**",
-            "lib/gcc/*/12.5.0/include/**",
-            "lib/gcc/*/12.5.0/include-fixed/**",
+            "lib/gcc/*/*/include/**",
+            "lib/gcc/*/*/include-fixed/**",
         ],
         allow_empty = True,
     ),

@@ -13,14 +13,17 @@ cc_feature(
 sonic_gcc_toolchain(
     name = "linux_x86_64",
     gcc_repo = "@gcc-linux-x86_64",
-    sysroot_repo = "@sysroot-bookworm//:directory",
+    gcc_version = "14.3.0",
+    os_release_constraint = "//platform:trixie",
+    sysroot_repo = "@sysroot-trixie//:directory",
     target_arch = "amd64",
 )
 
 sonic_gcc_toolchain(
     name = "cross_aarch64",
     gcc_repo = "@gcc-linux-aarch64",
-    sysroot_repo = "@sysroot-bookworm//:directory",
+    os_release_constraint = "//platform:trixie",
+    sysroot_repo = "@sysroot-trixie//:directory",
     target_arch = "arm64",
 )
 

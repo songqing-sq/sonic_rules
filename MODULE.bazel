@@ -56,15 +56,9 @@ fetch_gcc = use_repo_rule("//toolchains/gcc:gcc.bzl", "fetch_gcc")
 
 fetch_gcc(
     name = "gcc-linux-x86_64",
-    integrity = "sha256-UQduF1g5tDS7LcAAbACWkW31hejERmbTWw486CHVNds=",
-    urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-12.5.0-x86_64.tar.xz"],
+    integrity = "sha256-CzZeXaRR9cetxZT5Z4hdcYH/bRh9YImkvPNvlUvzzPk=",
+    urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-14.3.0-x86_64.tar.xz"],
 )
-
-# fetch_gcc(
-#     name = "gcc-linux-x86_64",
-#     integrity = "sha256-CzZeXaRR9cetxZT5Z4hdcYH/bRh9YImkvPNvlUvzzPk=",
-#     urls = ["https://github.com/f0rmiga/gcc-builds/releases/download/18082025/gcc-toolchain-14.3.0-x86_64.tar.xz"],
-# )
 
 fetch_gcc(
     name = "gcc-linux-aarch64",
@@ -88,26 +82,26 @@ apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.sources_list(
     architectures = ["amd64", "arm64"],
     components = ["main"],
-    suites = ["bookworm", "bookworm-updates"],
+    suites = ["trixie", "trixie-updates"],
     uris = ["https://snapshot.debian.org/archive/debian/20260409T202916Z"],
 )
 apt.sources_list(
     architectures = ["amd64", "arm64"],
     components = ["main"],
-    suites = ["bookworm-security"],
+    suites = ["trixie-security"],
     uris = ["https://snapshot.debian.org/archive/debian-security/20260409T182303Z"],
 )
 
-# Single multi-arch sysroot. The generated @sysroot-bookworm//:directory
+# Single multi-arch sysroot. The generated @sysroot-trixie//:directory
 # select()s the right packages from the target platform's CPU constraint, so
 # one set serves both the x86_64 and aarch64 cc toolchains.
 apt.install(
-    dependency_set = "sysroot-bookworm",
+    dependency_set = "sysroot-trixie",
     packages = ["libc6-dev", "libstdc++6", "linux-libc-dev"],
-    suites = ["bookworm", "bookworm-updates", "bookworm-security"],
+    suites = ["trixie", "trixie-updates", "trixie-security"],
 )
 
-use_repo(apt, "sysroot-bookworm")
+use_repo(apt, "sysroot-trixie")
 
 # pip hub for build-time Python tools (e.g. the jinja2 renderer). Declared in
 # this module so targets under @sonic_build_infra can depend on @pip_tools//...
