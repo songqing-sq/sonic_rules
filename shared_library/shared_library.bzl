@@ -201,6 +201,16 @@ def _sonic_shared_library_versioned_impl(name, visibility, dynamic_deps, deps, o
         target_path = output_name + ".so." + soversion,
         visibility = visibility,
     )
+    # `_dev_link_direct` mirrors libtool/Debian convention where the dev .so
+    # symlink points directly at the real .so.<full_version> file (skipping the
+    # soname hop). Downstream sonic_deb users that need byte-exact equivalence
+    # to Debian's lib*-dev packages should depend on this instead of _dev_link.
+    symlink_to_path(
+        name = name + "_dev_link_direct",
+        output = "direct/" + output_name + ".so",
+        target_path = output_name + ".so." + version,
+        visibility = visibility,
+    )
     shared_lib_files_rule(
         name = name + "_files",
         srcs = [name + "_shared", name + "_version_link"],

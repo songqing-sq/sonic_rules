@@ -9,8 +9,18 @@ load("//config:arch.bzl", "DEBIAN_ARCH")
 load("//shared_library:shared_library.bzl", "SymlinkInfo")
 
 _CONTENT_BUILTIN_VARS = select({
-    Label("//config:cpu_x86_64"): {"LIBDIR": "/usr/lib/x86_64-linux-gnu"},
-    Label("//config:cpu_aarch64"): {"LIBDIR": "/usr/lib/aarch64-linux-gnu"},
+    Label("//config:cpu_x86_64"): {
+        "LIBDIR": "/usr/lib/x86_64-linux-gnu",
+        # /lib/<multiarch> for core runtime libs that Debian places outside
+        # /usr (libc6, libnl-3-200, libnl-genl-3-200 etc). Under trixie's
+        # merged-usr layout this resolves to the same inode as ${LIBDIR},
+        # but the path in the .deb metadata still matters for `dpkg -L`.
+        "LIBDIR_BASE": "/lib/x86_64-linux-gnu",
+    },
+    Label("//config:cpu_aarch64"): {
+        "LIBDIR": "/usr/lib/aarch64-linux-gnu",
+        "LIBDIR_BASE": "/lib/aarch64-linux-gnu",
+    },
 })
 
 def _resolvecontent_vars(key, content_vars):
@@ -1008,7 +1018,7 @@ def _debug_symbols_pkg_impl(ctx):
 
     for path in input_paths:
         script_parts.append("if [ -f \"" + path + "\" ] && [[ \"" + path + "\" != *.params ]]; then")
-        script_parts.append("    BUILDID=$($OBJCOPY --dump-section .note.gnu.build-id=/dev/stdout \"" + path + "\" 2>/dev/null | od -An -tx1 | tr -d ' \\n' | head -c 40 || true)")
+        script_parts.append("    BUILDID=$($OBJCOPY --dump-section .note.gnu.build-id=/dev/stdout \"" + path + "\" 2>/dev/null | od -An -tx1 -v | tr -d ' \\n' | tail -c +33 | head -c 40 || true)")
         script_parts.append('    if [ -n "$BUILDID" ] && [ ${#BUILDID} -ge 40 ] && echo "$BUILDID" | grep -qE "^[0-9a-fA-F]+$"; then')
         script_parts.append('        PREFIX="${BUILDID:0:2}"')
         script_parts.append('        SUFFIX="${BUILDID:2}"')
