@@ -85,12 +85,6 @@ apt.sources_list(
     suites = ["trixie", "trixie-updates"],
     uris = ["https://snapshot.debian.org/archive/debian/20260409T202916Z"],
 )
-apt.sources_list(
-    architectures = ["amd64", "arm64"],
-    components = ["main"],
-    suites = ["trixie-security"],
-    uris = ["https://snapshot.debian.org/archive/debian-security/20260409T182303Z"],
-)
 
 # Single multi-arch sysroot. The generated @sysroot-trixie//:directory
 # select()s the right packages from the target platform's CPU constraint, so
@@ -98,7 +92,7 @@ apt.sources_list(
 apt.install(
     dependency_set = "sysroot-trixie",
     packages = ["libc6-dev", "libstdc++6", "linux-libc-dev"],
-    suites = ["trixie", "trixie-updates", "trixie-security"],
+    suites = ["trixie", "trixie-updates"],
 )
 
 use_repo(apt, "sysroot-trixie")
