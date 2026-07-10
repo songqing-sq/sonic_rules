@@ -434,6 +434,9 @@ def _sonic_control_tar_impl(ctx):
     control_lines.append("Architecture: %s" % ctx.attr.architecture)
     control_lines.append("Maintainer: %s" % ctx.attr.maintainer)
 
+    if ctx.attr.multi_arch:
+        control_lines.append("Multi-Arch: %s" % ctx.attr.multi_arch)
+
     if ctx.attr.priority:
         control_lines.append("Priority: %s" % ctx.attr.priority)
     if ctx.attr.section:
@@ -622,6 +625,7 @@ _sonic_control_tar = rule(
         "version": attr.string(mandatory = True),
         "architecture": attr.string(default = "amd64"),
         "maintainer": attr.string(mandatory = True),
+        "multi_arch": attr.string(default = ""),
         "description": attr.string(mandatory = True),
         "section": attr.string(),
         "priority": attr.string(),
@@ -660,9 +664,12 @@ def _sonic_deb_assemble_impl(ctx):
     """Assemble a .deb file from debian-binary, control.tar.gz and data.tar.gz."""
     package_file_name = ctx.attr.package_file_name
     if not package_file_name:
+        # Debian filename convention: the version in the .deb filename omits the
+        # epoch ("N:") prefix, even though the control Version field keeps it.
+        file_version = ctx.attr.version.split(":")[-1]
         package_file_name = "%s_%s_%s.deb" % (
             ctx.attr.package,
-            ctx.attr.version,
+            file_version,
             ctx.attr.architecture,
         )
 
@@ -1242,6 +1249,7 @@ def _sonic_deb_impl(
     package_name = kwargs.get("package", name)
     version = kwargs.get("version", "1.0.0")
     maintainer = kwargs.get("maintainer", "")
+    multi_arch = kwargs.get("multi_arch", "")
     description = kwargs.get("description", "")
 
     # Common kwargs extracted once to avoid repetition
@@ -1337,6 +1345,7 @@ def _sonic_deb_impl(
         version = version,
         architecture = architecture,
         maintainer = maintainer,
+        multi_arch = multi_arch,
         description = description,
         section = section if section else "misc",
         priority = priority if priority else "optional",
@@ -1412,6 +1421,7 @@ def _sonic_deb_impl(
             version = version,
             architecture = architecture,
             maintainer = maintainer,
+            multi_arch = multi_arch,
             description = "Debug symbols for " + package_name,
             section = "debug",
             priority = priority if priority else "optional",
@@ -1470,6 +1480,7 @@ def sonic_deb(name, content, data = None, gen_dbg = False, visibility = ["//visi
             version = version,
             architecture = kwargs.get("architecture", DEBIAN_ARCH),
             maintainer = kwargs.get("maintainer", ""),
+            multi_arch = kwargs.get("multi_arch", ""),
             description = kwargs.get("description", ""),
             section = section,
             priority = priority,
