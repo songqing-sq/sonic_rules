@@ -8,13 +8,13 @@ _PLATFORMS_FLAG = "//command_line_option:platforms"
 
 def _venv_transition_impl(settings, attr):
     return {
-        _VENV_FLAG: attr.venv,
+        _VENV_FLAG: attr.venv or settings[_VENV_FLAG],
         _PLATFORMS_FLAG: [str(Label("//platform:x86_64_bookworm"))],
     }
 
 _venv_transition = transition(
     implementation = _venv_transition_impl,
-    inputs = [],
+    inputs = [_VENV_FLAG],
     outputs = [_VENV_FLAG, _PLATFORMS_FLAG],
 )
 

@@ -12,7 +12,7 @@ bazel_dep(name = "swig", version = "4.1.0")
 bazel_dep(name = "protobuf", version = "29.0")
 bazel_dep(name = "rules_cc", version = "0.2.14")
 bazel_dep(name = "rules_python", version = "1.7.0")
-bazel_dep(name = "aspect_rules_py", version = "1.8.4")
+bazel_dep(name = "aspect_rules_py", version = "1.11.7")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "tar.bzl", version = "0.8.1")
 # libarchive: linked into mke2fs (@e2fsprogs_src//:mke2fs) for `mke2fs -d
@@ -109,26 +109,22 @@ use_repo(apt, "sysroot-trixie")
 # here. Uses the same aspect_rules_py uv extension as docker-base-bookworm.
 uv = use_extension("@aspect_rules_py//uv/unstable:extension.bzl", "uv")
 uv.declare_hub(hub_name = "pip_tools")
-uv.declare_venv(
+uv.project(
     hub_name = "pip_tools",
-    venv_name = "default",
-)
-uv.lockfile(
-    src = "//jinja2:uv.lock",
-    hub_name = "pip_tools",
-    venv_name = "default",
+    pyproject = "//jinja2:pyproject.toml",
+    lock = "//jinja2:uv.lock",
+    # All packages in this lock ship wheels; no sdist build needed, so don't
+    # require `build` to be present in the lock (it isn't).
+    default_build_dependencies = [],
 )
 
-# Build-time pyang (YANG codegen) runner. Separate venv on the same pip_tools
+# Build-time pyang (YANG codegen) runner. Separate project on the same pip_tools
 # hub so @sonic_build_infra//pyang:pyang can depend on @pip_tools//pyang.
-uv.declare_venv(
+uv.project(
     hub_name = "pip_tools",
-    venv_name = "pyang",
-)
-uv.lockfile(
-    src = "//pyang:uv.lock",
-    hub_name = "pip_tools",
-    venv_name = "pyang",
+    pyproject = "//pyang:pyproject.toml",
+    lock = "//pyang:uv.lock",
+    default_build_dependencies = [],
 )
 use_repo(uv, "pip_tools")
 

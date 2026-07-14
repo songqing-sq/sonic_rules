@@ -6,7 +6,7 @@ py_venv_binary(
     name = "render",
     srcs = ["render.py"],
     main = "render.py",
-    venv = "default",
+    venv = "jinja2-render",
     visibility = ["//visibility:public"],
     deps = [
         "@pip_tools//jinja2",

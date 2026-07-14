@@ -17,7 +17,7 @@ py_venv_binary(
         "pyang_main.py",
     ],
     main = "pyang_main.py",
-    venv = "pyang",
+    venv = "pyang-runner",
     visibility = ["//visibility:public"],
     deps = [
         "@pip_tools//pyang",
