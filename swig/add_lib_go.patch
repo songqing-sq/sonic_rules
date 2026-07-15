@@ -1,0 +1,25 @@
+--- a/BUILD
++++ b/BUILD
+@@ -134,6 +134,22 @@ cc_binary(
+ )
+ 
+ filegroup(
++    name = "lib_go",
++    # Go SWIG library files. The BCR swig overlay ships Lib/go/** on disk but
++    # only exposes lib_python/lib_java filegroups; swig_gen_go needs the Go
++    # runtime (.swg) plus the common std/typemaps buckets on SWIG_LIB.
++    srcs = glob([
++        "Lib/*.i",
++        "Lib/*.swg",
++        "Lib/go/**",
++        "Lib/std/**",
++        "Lib/typemaps/**",
++    ]),
++    licenses = ["notice"],
++    visibility = ["//visibility:public"],
++)
++
++filegroup(
+     name = "lib_java",
+     srcs = glob([
+         "Lib/*.i",

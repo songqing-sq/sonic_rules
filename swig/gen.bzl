@@ -163,6 +163,10 @@ def _swig_gen_go_impl(ctx):
 
     for include in compilation_context.includes.to_list():
         args.add("-I" + include)
+    for include in compilation_context.quote_includes.to_list():
+        args.add("-I" + include)
+    for include in compilation_context.system_includes.to_list():
+        args.add("-I" + include)
     for external_include in compilation_context.external_includes.to_list():
         args.add("-I" + external_include)
 
